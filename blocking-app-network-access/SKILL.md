@@ -61,9 +61,53 @@ proceed autonomously.
 1. **Reversible + logged.** Log EVERY firewall rule, hosts entry, service, and
    task you touch. End with a single UNDO script that restores everything.
 2. **Elevation required.** All firewall/hosts/service commands need an
-   Administrator PowerShell. If not elevated, say so clearly and stop.
+   Administrator PowerShell. Detect this EARLY and use the one-click path in
+   the Elevation section below — do NOT default to "relaunch Claude".
 3. **Never delete the app or its data.** Only block network access.
 4. Show the plan, then proceed autonomously — no per-step approval needed.
+
+## Elevation (handle this EARLY, before applying anything)
+
+Blocking ALWAYS needs admin. Check elevation up front — right after discovery,
+before the first firewall/hosts/service command — so the user isn't surprised
+mid-run.
+
+**Detect:**
+```powershell
+([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+```
+`True` = elevated, proceed. `False` = not elevated, do the hand-off below.
+
+**If NOT elevated — DO NOT just tell the user to relaunch Claude.** That is the
+slow path. Instead:
+
+1. First, write the full **Apply** and **Undo** scripts to disk (writing files
+   needs no elevation), so everything is ready to run. Use a clear folder like
+   `C:\Users\<user>\<App>-Block\` with `Apply-<App>Block.ps1` (carries a
+   `#requires -RunAsAdministrator` guard, logs every action, backs up the hosts
+   file first) and `Undo-<App>Block.ps1`.
+2. Then offer the **one-click elevation** path as the default: the user pastes
+   this into the Claude Code input box (the `!` runs it in their session, and
+   `Start-Process -Verb RunAs` triggers a single UAC prompt → they click Yes):
+
+   ```
+   ! powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','C:\Users\<user>\<App>-Block\Apply-<App>Block.ps1'"
+   ```
+
+   A new elevated window opens, runs all blocking layers, and (`-NoExit`) stays
+   open; results also go to the script's log file.
+3. Tell the user the **live monitoring test + static verification can then run
+   in THIS same non-elevated session** — `Get-NetTCPConnection`,
+   `Resolve-DnsName`, `netstat` are read-only and need no admin. So after the
+   UAC run, just continue here; no relaunch required.
+
+Only offer "relaunch Claude Code from an elevated PowerShell" as a SECONDARY
+option for users who prefer Claude to drive every apply step interactively.
+
+**Edge cases to mention if the UAC prompt fails:** the user's account must be an
+Administrator account (a Standard account's UAC prompt asks for a separate
+admin password). Never suggest disabling UAC — the one-click path works with
+UAC on.
 
 ## Procedure
 
@@ -132,4 +176,6 @@ proceed autonomously.
   it's a supplement; the per-exe firewall block is the real defense.
 - **Asking the user about scope/self-heal.** Pre-decided — see Default Decisions.
 - **Running without elevation.** Firewall/service/hosts edits silently fail or
-  error without admin rights.
+  error without admin rights. Check elevation early and use the one-click
+  `Start-Process -Verb RunAs` path (see Elevation) — don't make the user
+  relaunch Claude.
