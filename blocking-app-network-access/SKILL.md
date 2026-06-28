@@ -132,9 +132,41 @@ UAC on.
 - **Hosts file:** add `0.0.0.0` entries for every vendor/update/license/
   telemetry/analytics/promo/news domain found, plus obvious variants (`api.`,
   `update.`, `license.`, `telemetry.`, `cdn.`, `analytics.` subdomains).
+  **Clear the `ReadOnly` attribute on the hosts file FIRST** (other blockers
+  often leave it set — see Script Robustness). Then `ipconfig /flushdns`.
 - **Anti-trick hardening:** stop AND disable updater services/tasks; block their
   exes by path too (so a restarted service still can't reach the net); block any
   watchdog/relauncher process.
+
+### Script Robustness (learned from real runs — DO ALL THREE)
+
+When you generate an Apply script, it MUST be:
+
+1. **Hosts-attribute-safe.** Before writing the hosts file, clear its ReadOnly
+   flag, and restore your intent afterward. A prior blocklist (e.g. an Adobe
+   block) commonly leaves `hosts` ReadOnly — `Copy-Item`/read succeeds but
+   `Add-Content`/write fails with `Access denied`. Do this in BOTH Apply and
+   Undo:
+   ```powershell
+   $hosts = "$env:WINDIR\System32\drivers\etc\hosts"
+   if ((Get-Item $hosts -Force).IsReadOnly) { Set-ItemProperty $hosts -Name IsReadOnly -Value $false }
+   ```
+   If write STILL fails after clearing ReadOnly, suspect **Controlled Folder
+   Access** (Windows Security → Ransomware protection) guarding System32 — tell
+   the user to allow the script or temporarily disable it. Ignore unrelated
+   Defender noise like error `0x800106ba`.
+
+2. **Fault-isolated per layer — NEVER all-or-nothing.** Do NOT let a global
+   `$ErrorActionPreference='Stop'` abort the whole run on one failure. Wrap each
+   layer (firewall / hosts / service+task) in its own `try/catch`, log the
+   failure, and CONTINUE to the next layer. Defense-in-depth is worthless if one
+   layer's error silently skips the others. Print a per-layer PASS/FAIL summary
+   at the end.
+
+3. **Idempotent and re-runnable.** Every step is skip-if-exists: firewall rule
+   already present → skip; hosts block already there → skip; service already
+   disabled → skip. Then recovering from a partial run is just "run Apply
+   again" — no bespoke Resume script needed.
 
 ### 3. Live Monitoring Test (after blocking)
 1. Kill the app and ALL related processes for a clean baseline; confirm nothing
@@ -179,3 +211,11 @@ UAC on.
   error without admin rights. Check elevation early and use the one-click
   `Start-Process -Verb RunAs` path (see Elevation) — don't make the user
   relaunch Claude.
+- **Hosts `Access denied` even when elevated.** The hosts file's ReadOnly
+  attribute (left by a prior blocklist) — clear `IsReadOnly` before writing.
+  See Script Robustness.
+- **One layer's failure aborting the rest.** A global `ErrorActionPreference =
+  'Stop'` lets a hosts error skip the service/task layer. Isolate each layer in
+  try/catch and continue. See Script Robustness.
+- **Non-idempotent Apply script.** If it can't be safely re-run, a partial
+  failure forces a hand-written resume script. Make every step skip-if-exists.
