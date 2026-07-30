@@ -840,7 +840,276 @@ buildable systems plus daily discipline, not from luck or editing tricks.
 
 ---
 
-## 8. Meta
+## 8. Vibe Coding & The Pre-Production Security Pass
+
+Rules for the gap between "it works" and "it's safe to ship." Vibe coding
+gets you to 80% fast and that is genuinely fine — the failure mode is
+treating 80% as done. Source: a founder shipped a Lovable-built app, had his
+Stripe keys scraped by automated bots within hours, and lost $2,500 before
+lunch — plus a full day burned on Stripe support, fraud reports, key
+rotation, and customer apologies.
+
+> Related: §3.1–3.4 cover secret-handling rules for the agent itself. This
+> section is about the **gate before production** — what you verify after the
+> AI has written the code and before the code faces the internet.
+
+### 8.1 Vibe code to 80%, engineer the last 20% — never ship AI output straight to production
+- **Rule:** Treat AI-generated code as a complete draft, never as a finished
+  deliverable. The last 20% — secrets, auth, permissions, error paths — is
+  hand-verified engineering work every time. "It runs" is not the bar;
+  "it survives contact with the internet" is.
+- **Explanation:** AI generates code that works, because working is what it
+  optimizes for. It does not optimize for "what happens when a bot scrapes
+  this repo 40 minutes after deploy." The 80% (features, UI, happy-path
+  logic) is where AI is genuinely faster than you. The 20% (credential
+  handling, authorization boundaries, blast-radius limits) is where AI's
+  defaults are actively dangerous, because a plausible-looking default is
+  indistinguishable from a correct one until it's exploited. Skipping the
+  finish isn't building fast — it's gambling with a delayed invoice.
+- **Applies to:** Every AI-assisted build, and *especially* one-shot platform
+  builds: Lovable, v0, Bolt, Replit Agent, Cursor Composer, Firebase Studio,
+  Claude Code itself. Highest risk when the generated app touches money
+  (Stripe, PayPal, Lemon Squeezy), user data (Supabase, Firebase), cloud
+  infra (AWS/GCP keys), or LLM APIs with metered billing (Anthropic, OpenAI).
+- **Example:**
+  ```
+  The 80/20 split, concretely:
+
+  VIBE CODE THIS (AI is faster, low downside if wrong)
+    · UI components, layout, styling, responsive behavior
+    · CRUD endpoints, form handling, validation messages
+    · Data fetching, loading states, optimistic updates
+    · Tests, seed data, fixtures
+    · Copy, emails, docs
+
+  ENGINEER THIS (hand-verify every time, no exceptions)
+    · Where secrets live and how they reach the runtime
+    · Every authorization check ("can THIS user do THIS?")
+    · Database access rules (RLS policies, row ownership)
+    · Anything touching payments, refunds, or credits
+    · Anything that deletes (see §6.1)
+    · CORS, redirect allow-lists, webhook signature verification
+    · Rate limits on public and auth endpoints
+  ```
+
+### 8.2 Run a 20-minute security pass on every AI-generated commit before it reaches production
+- **Rule:** Before any AI-written change touches production, run a fixed
+  three-part pass: **(1) secret scan, (2) auth review, (3) permissions
+  audit.** Every commit. No "it's just a small change" exemption.
+- **Explanation:** The value here is that it's a *checklist, not a judgment
+  call* — you don't have to be in a security mindset to run it, which is
+  exactly why it survives busy weeks. Twenty minutes is cheaper than one
+  incident by roughly two orders of magnitude ($2,500 + a torched day vs.
+  20 minutes). And the three parts map to the three ways AI-generated apps
+  actually get breached: a leaked credential, a missing ownership check, and
+  an over-scoped key.
+- **Applies to:** Any repo with an AI in the commit path. Stacks/tools:
+  `gitleaks` or `trufflehog` for scanning, GitHub secret scanning + push
+  protection (free on public repos), `semgrep` for auth patterns, plus your
+  platform's own advisors (`supabase get_advisors`, AWS IAM Access Analyzer).
+  In this repo you can run the bundled `/security-review` skill as the
+  driver for the pass.
+- **Example:**
+  ```bash
+  # ── PART 1: Secret scan (5 min) ─────────────────────────────
+  gitleaks detect --source . --verbose          # working tree
+  gitleaks detect --source . --log-opts="--all" # FULL HISTORY, not just HEAD
+  # Also grep the build output — bundlers happily inline server env vars:
+  #   NEXT_PUBLIC_* / VITE_* / REACT_APP_* are SHIPPED TO THE BROWSER.
+  grep -rE "sk_live|sk_test|AKIA|ghp_|xoxb-|-----BEGIN" .next/ dist/ build/
+
+  # ── PART 2: Auth review (10 min) ────────────────────────────
+  # For EVERY route/handler the AI added, answer out loud:
+  #   a) Is the caller authenticated?
+  #   b) Is the caller AUTHORIZED for THIS specific record?  ← most-missed
+  #   c) Can an ID in the URL/body be swapped for someone else's? (IDOR)
+  #   d) Are webhooks signature-verified before the body is trusted?
+
+  # ── PART 3: Permissions audit (5 min) ───────────────────────
+  #   · Is every API key scoped to the minimum it needs?
+  #   · Is the DB using a restricted role, not the service/admin key?
+  #   · Are RLS policies ON for every table (not just written, ENABLED)?
+  #   · Does the client bundle only ever see publishable/anon keys?
+  ```
+  ```
+  The IDOR check that catches the most real bugs:
+
+  // AI wrote this — authenticated but NOT authorized
+  app.get('/api/invoices/:id', requireAuth, async (req, res) => {
+    const invoice = await db.invoices.findUnique({ where: { id: req.params.id } });
+    res.json(invoice);          // ← any logged-in user reads ANY invoice
+  });
+
+  // Fixed — ownership is part of the query, not an afterthought
+  app.get('/api/invoices/:id', requireAuth, async (req, res) => {
+    const invoice = await db.invoices.findFirst({
+      where: { id: req.params.id, userId: req.user.id },   // ← scoped
+    });
+    if (!invoice) return res.status(404).end();  // 404, not 403 — don't
+    res.json(invoice);                           //   confirm it exists
+  });
+  ```
+
+### 8.3 Assume the platform protects nothing — no sandboxing, no scanning, no least privilege by default
+- **Rule:** Never assume your build platform or host sandboxes secrets, audits
+  for exposed credentials, or enforces least privilege. It does none of those
+  by default, and it will commit your `.env` to a public GitHub repo if you
+  let it. Verify the boundaries yourself, once, per project.
+- **Explanation:** This is the assumption that cost the founder $2,500. These
+  platforms are optimized for time-to-first-deploy, and every safety check is
+  friction against that goal — so the defaults are permissive. Nothing warns
+  you that the repo is public, that `.env` isn't gitignored, or that the key
+  you pasted is a live unrestricted secret. Automated bots continuously scrape
+  new public commits for credential patterns; the window between push and
+  exploitation is measured in **minutes to hours**, not days.
+- **Applies to:** Lovable, v0, Bolt, Replit, Firebase Studio, Glitch,
+  CodeSandbox, and any AI builder with a one-click GitHub export. Also plain
+  Git repos where an AI agent has commit access. Stacks: `.env` /
+  `.env.local` files, Next.js `NEXT_PUBLIC_*`, Vite `VITE_*`, CRA
+  `REACT_APP_*`, Supabase `service_role` key, Firebase admin SDK JSON.
+- **Example:**
+  ```
+  One-time per-project verification (do this before the first push):
+
+  [ ] Repo visibility confirmed — is it PUBLIC? Do you want that?
+  [ ] .gitignore contains: .env, .env.*, !.env.example, *.pem, *.key,
+      credentials.json, serviceAccount*.json
+  [ ] `git ls-files | grep -E '^\.env|\.pem$|credentials'` returns NOTHING
+      (if it returns something, the secret is already in history — rotate
+       the key, don't just delete the file; see §8.5)
+  [ ] Secrets live in the host's env-var store (Vercel/Netlify/Fly
+      dashboard), NOT in a committed file
+  [ ] GitHub push protection enabled (Settings → Code security)
+  [ ] Pre-commit hook installed so this can't regress:
+
+      # .pre-commit-config.yaml
+      repos:
+        - repo: https://github.com/gitleaks/gitleaks
+          rev: v8.21.2
+          hooks: [{ id: gitleaks }]
+
+  The trap that gets everyone:
+    NEXT_PUBLIC_STRIPE_SECRET_KEY=sk_live_...   ← the NEXT_PUBLIC_ prefix
+    ships this to every browser that loads your site. Prefix means PUBLIC.
+    Server-only secrets get NO prefix, ever.
+  ```
+
+### 8.4 Least privilege on every credential — make a leak boring
+- **Rule:** Every key is scoped to the minimum permission it needs, restricted
+  by domain/IP where the provider supports it, and rotatable in under five
+  minutes. Never use a live unrestricted admin key in application code.
+- **Explanation:** You cannot fully prevent a leak — you can decide what a
+  leak *costs*. An unrestricted `sk_live_` key is a blank check: bots can
+  create charges, issue refunds to their own cards, and read your entire
+  customer list. A restricted key scoped to "create PaymentIntents only" turns
+  the same leak into a nuisance. This is the single highest-leverage control
+  in the section, because it's configured once and it downgrades every future
+  mistake — including mistakes an AI makes months from now.
+- **Applies to:** Payments (Stripe restricted keys, PayPal scoped creds),
+  cloud (AWS IAM policies with explicit `Resource` ARNs — never `"*"`),
+  databases (Supabase `anon` key + RLS on the client, `service_role` only in
+  server code / never in a `NEXT_PUBLIC_` var), LLM APIs (Anthropic/OpenAI
+  project-scoped keys with spend caps), GitHub (fine-grained PATs, not
+  classic), Google (service accounts with a single role).
+- **Example:**
+  ```
+  Stripe — what the founder should have had:
+
+  WRONG:  sk_live_...  (unrestricted secret key in app code)
+          → leaked key = create charges, refund to attacker's card,
+            export all customers, read every payout. $2,500 and climbing.
+
+  RIGHT:  rk_live_...  (restricted key, Stripe Dashboard → API keys →
+                        Create restricted key)
+          Permissions granted:  PaymentIntents: write
+                                Customers:      read
+          Everything else:      NONE
+          → leaked key = attacker can create a payment intent that only
+            ever pays YOU. Refunds, payouts, customer export: denied.
+
+  Plus, regardless of key type:
+    · Enable Stripe Radar rules + a per-day volume alert
+    · Turn on billing/spend alerts on EVERY metered API (Stripe, AWS,
+      Anthropic, OpenAI) — an alert at $50 would have caught this at
+      lunch instead of after it
+    · Set a hard spend cap where the provider offers one
+  ```
+  ```
+  AWS — the same principle:
+
+  WRONG:  { "Effect": "Allow", "Action": "*", "Resource": "*" }
+  RIGHT:  { "Effect": "Allow",
+            "Action": ["s3:GetObject", "s3:PutObject"],
+            "Resource": "arn:aws:s3:::my-app-uploads/*" }
+
+  Supabase — the same principle:
+    Client bundle:  anon key + RLS enabled on every table
+    Server only:    service_role key (bypasses RLS — treat as root)
+    Never:          service_role in NEXT_PUBLIC_* / VITE_* / client code
+  ```
+
+### 8.5 Write the leak runbook before you leak — rotate first, investigate second
+- **Rule:** Keep a short `INCIDENT_RUNBOOK.md` in the repo covering credential
+  exposure. The first action on any suspected leak is always **rotate the key**
+  — before investigating, before reading logs, before deciding whether it was
+  really exposed. Deleting the file is not rotation.
+- **Explanation:** The $2,500 was the visible cost; the torched day was the
+  rest of it — Stripe support, fraud reports, key rotation, customer
+  apologies, all improvised under pressure. A runbook converts that day into
+  about an hour, because you're executing steps instead of inventing them
+  while money leaves. The rotate-first ordering matters: every minute spent
+  confirming the leak is a minute the key still works. And the most common
+  mistake is `git rm .env` + commit — the secret is still in history, still
+  scrapeable, and still valid.
+- **Applies to:** Every project holding a credential that can spend money,
+  read user data, or mutate infrastructure. Stacks: agnostic, but the runbook
+  should name your actual providers and dashboards with links, because
+  hunting for "where do I rotate a Supabase service key" mid-incident is
+  exactly the cost you're trying to avoid.
+- **Example:**
+  ```markdown
+  # INCIDENT_RUNBOOK.md — Credential Exposure
+
+  ## 0. Assume compromised. Do not wait for proof.
+  If a key MIGHT be exposed, it IS exposed. Rotate.
+
+  ## 1. Rotate (first 5 minutes) — links, not searches
+  - [ ] Stripe:    dashboard.stripe.com/apikeys → roll key → update host env
+  - [ ] Supabase:  Project Settings → API → reset service_role
+  - [ ] AWS:       IAM → user → deactivate + delete access key, create new
+  - [ ] Anthropic: console.anthropic.com/settings/keys → revoke
+  - [ ] GitHub:    Settings → Developer settings → revoke PAT
+  - [ ] Redeploy so the new values are live; confirm the OLD key now 401s.
+
+  ## 2. Contain (next 15 minutes)
+  - [ ] Stripe: review recent charges/refunds; enable Radar block rules
+  - [ ] Cloud:  check CloudTrail / audit logs for use of the old key
+  - [ ] Cap or pause any metered API that shows abnormal spend
+  - [ ] Force-logout all sessions if a signing/JWT secret was involved
+
+  ## 3. Purge from history (same day)
+  - [ ] Confirm exposure scope: `gitleaks detect --log-opts="--all"`
+  - [ ] Scrub with `git filter-repo` or BFG, then force-push
+        NOTE: rewriting history does NOT un-leak it. Rotation in step 1
+        is the real fix; this is cleanup so it isn't re-found later.
+  - [ ] Add the pattern to .gitignore + install the gitleaks pre-commit hook
+
+  ## 4. Report & notify (same day)
+  - [ ] File a fraud report with the provider (Stripe: Support → Disputes)
+  - [ ] If customer data was reachable: check breach-notification duties
+        (GDPR Art. 33 = 72 hours to the supervisory authority; US state
+        laws vary). Do not skip this because the app is small.
+  - [ ] Write the customer-facing message yourself. Be specific.
+
+  ## 5. Post-mortem (within a week, blameless)
+  - [ ] How did it reach the repo/bundle? Which control was missing?
+  - [ ] Add that control (scan, hook, scoped key, spend alert)
+  - [ ] Add the failure mode to your §8.2 security-pass checklist
+  ```
+
+---
+
+## 9. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
