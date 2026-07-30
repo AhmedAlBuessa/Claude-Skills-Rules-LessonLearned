@@ -629,7 +629,218 @@ healthcare, tax, and legal domains.
 
 ---
 
-## 7. Meta
+## 7. Content Machine & Audience Growth Rules
+
+Rules for building an organic audience with zero ad spend — treated as an
+engineering system, not a vibe. Source: a 0 → 50,000 followers / 5M views /
+$0 spent run over 90 days. The lesson is that the growth came from three
+buildable systems plus daily discipline, not from luck or editing tricks.
+
+### 7.1 Run a weekly content audit — kill what flops, double down on what works
+- **Rule:** Every week, without exception, review the last week's posts
+  against real engagement data: what performed, what flopped, what got
+  *saved*, what got *shared*, what got skipped. Double down on winners.
+  Kill losers permanently — a format that flops never runs again.
+- **Explanation:** Content is not "set it and forget it." Most people post on
+  instinct and never close the feedback loop, so they repeat losing formats
+  for months. A weekly audit turns posting from guessing into deciding. The
+  key metrics are not likes — they're **saves** (the audience thinks it's
+  worth keeping) and **shares** (the audience thinks it makes *them* look
+  good). Those two drive algorithmic distribution far more than likes.
+- **Applies to:** Any creator, indie hacker, or founder doing content-led
+  growth on LinkedIn, X/Twitter, TikTok, YouTube Shorts, Instagram Reels, or
+  a newsletter. Stacks to build the audit: a Next.js or Streamlit dashboard
+  + platform APIs (LinkedIn, X API v2, TikTok Display API, YouTube Data API,
+  Instagram Graph API) + Postgres/Supabase for history + a weekly cron
+  (Vercel Cron, GitHub Actions schedule, Supabase pg_cron).
+- **Example:**
+  ```
+  Direct your AI: "Build me a weekly content audit job."
+
+  Schema (one row per post, refreshed daily):
+    post_id, platform, posted_at, topic, format, hook_type,
+    views, likes, comments, saves, shares, watch_through_rate,
+    follows_gained, new_vs_returning_viewer_pct
+
+  Weekly cron output (Monday 8am, emailed/Slacked to you):
+    ── TOP 3 (double down) ──────────────────────────────
+    1. "Soft delete rule"  | format: talking-head+code | saves: 4,210
+    2. "Customer ceiling"  | format: whiteboard        | saves: 3,880
+    3. "Retention engine"  | format: talking-head+code | saves: 3,120
+
+    ── BOTTOM 3 (kill permanently) ──────────────────────
+    1. "My morning routine"   | format: vlog     | saves: 41   ← KILL
+    2. "Tool tier list"       | format: listicle | saves: 88   ← KILL
+    3. "Reacting to a tweet"  | format: duet     | saves: 63   ← KILL
+
+    ── PATTERNS DETECTED ────────────────────────────────
+    · Topic "compliance/legal gotchas" outperforms avg by 3.4x on saves
+    · Format "talking-head + on-screen code" beats "vlog" by 11x
+    · Posting 07:00–09:00 local beats 18:00–20:00 by 2.1x on reach
+    · Hooks that name a mistake ("you just broke...") beat how-to hooks 2.8x
+
+  Rule of thumb: 3 strikes → the format is dead. Do not revive it
+  because you personally liked making it.
+  ```
+
+### 7.2 Give away your best work for free — optimize for saves and shares
+- **Rule:** Publish your actual best material for free: every fix, framework,
+  script, and prompt. Do not hold the good stuff back behind a paywall or a
+  "DM me for the link" gate. Design each post so it is worth *saving*.
+- **Explanation:** When you give away real, usable value, the audience does
+  your marketing for you — 128,000 saves and 39,000 shares in 90 days is
+  distribution you cannot buy. Gated or teaser content kills that loop: a
+  teaser is not worth saving, so it never gets shared, so the algorithm never
+  amplifies it. The counter-intuitive part: giving away the "how" does not
+  cannibalize your product. Most people who save it will never build it —
+  they'll hire you or buy the productized version. The saves are the funnel.
+- **Applies to:** Developer-tool marketing, technical education, agency /
+  consulting lead-gen, indie SaaS launches, course creators, open-source
+  maintainers. Stacks: your content *is* the artifact — publish real code.
+  Back it with a public GitHub repo (like this one), a Gist, a Notion page,
+  or a docs site (Docusaurus, Mintlify, Nextra) so the "save" has somewhere
+  permanent to land.
+- **Example:**
+  ```
+  WRONG (gated, unsaveable):
+    "There are 3 mistakes killing your AI app. Comment 'GUIDE' and
+     I'll DM you the checklist."
+    → No value in the post itself. Nothing to save. Dies in the feed.
+
+  RIGHT (complete, saveable):
+    "Your delete-account endpoint just broke federal law. Here's the fix:
+       1. Split user-controlled vs legally-retained data  [code shown]
+       2. Retention policy table with expires_at          [SQL shown]
+       3. Append-only audit log                           [SQL shown]
+     Full rules doc: github.com/<you>/AI_Rules.md"
+    → Complete, usable, worth saving. Gets shared to their team Slack.
+
+  The repo link is the only "CTA" you need. No DM gate, no lead magnet.
+  ```
+
+### 7.3 Reply to every comment and DM — engagement is the distribution engine
+- **Rule:** Personally reply to every single comment and DM. Build a priority
+  notification queue so nothing that matters gets missed. Do not automate the
+  reply itself — automate only the *triage*.
+- **Explanation:** 71% of views came from people who had never seen the
+  account before. That happens because the algorithm reads engagement (and
+  your replies count as engagement) and pushes the post to new audiences.
+  Every reply is a signal that compounds distribution. The bottleneck is
+  attention, not typing — at scale you physically cannot read a flat
+  notification feed, so high-value comments (a real question, a buying
+  signal, a big account) get buried under "🔥🔥🔥". The queue fixes that.
+  Automating the actual replies destroys the thing that makes it work: real
+  humans can tell, and generic replies get no reciprocal engagement.
+- **Applies to:** Any creator past ~1,000 followers where the comment volume
+  exceeds what a flat feed can handle. Stacks: a small Node/Python service +
+  platform webhooks or polling + a scoring function + Postgres/Redis queue,
+  surfaced in a simple dashboard or piped into Slack/Telegram/Discord. Can
+  also be a Claude Code skill or an MCP server so triage runs in your normal
+  workflow.
+- **Example:**
+  ```
+  Direct your AI: "Build me a priority notification queue."
+
+  Scoring function (highest score = reply first):
+    +50  Contains a question mark / asks "how do I..."
+    +40  Buying signal ("do you consult", "pricing", "can you build this")
+    +30  Commenter follower count > 5,000
+    +25  Comment length > 100 chars (real engagement, not an emoji)
+    +20  DM (not a public comment)
+    +15  Post is < 2 hours old (early replies boost algorithmic reach most)
+    +10  Commenter is a returning/repeat engager
+     -5  Emoji-only or single-word comment
+    -40  Spam / crypto / bot pattern detected
+
+  Queue view:
+    [98] @founder_dana (12k)  "How do you handle HIPAA on Supabase?"  8m ago
+    [85] DM @acme_cto         "Do you do consulting? We need..."      22m ago
+    [61] @dev_sam (400)       "This saved my launch, thank you — one   1h ago
+                               question about the audit table..."
+    [ 5] @randomuser          "🔥"                                    3m ago
+
+  You still write every reply yourself. The queue only decides the order.
+  ```
+
+### 7.4 Build the system, then show up daily — no budget required
+- **Rule:** Treat daily publishing as a non-negotiable commitment for at least
+  90 days before judging results. Zero ad spend, zero boosts, zero paid
+  promotion. If growth is flat, fix the product or the content quality — do
+  not reach for a budget.
+- **Explanation:** The three systems above (audit, value-first, reply queue)
+  are multipliers on volume, not substitutes for it. 90 days of daily
+  posting is roughly 90 shots on goal; a weekly audit only has signal if
+  there's enough volume to detect a pattern. Paid promotion masks the real
+  question — is this worth talking about? — and buys views that don't save,
+  share, or come back. The two real inputs are a product worth talking about
+  and the discipline to publish every day.
+- **Applies to:** Any $0-budget go-to-market. Especially relevant for solo
+  builders / AI-directed engineers whose competitive advantage is shipping
+  speed, not marketing spend. Stacks for the discipline layer: a content
+  calendar in Notion/Linear/plain markdown + a scheduler (Buffer, Typefully,
+  Hypefury, or a self-built Vercel Cron poster) + a streak tracker.
+- **Example:**
+  ```
+  The 90-day scoreboard (track these, nothing else):
+
+  | Metric                  | Why it matters                          |
+  |-------------------------|-----------------------------------------|
+  | Posts published         | The input. Miss days = no data.         |
+  | Saves                   | "Worth keeping" — best quality proxy    |
+  | Shares                  | "Makes me look good" — best reach proxy |
+  | % new (never-seen) views| Is the algorithm pushing you outward?   |
+  | Follows per 1k views    | Conversion rate of the content itself   |
+  | Replies sent by you     | The engagement you control directly     |
+  | $ spent                 | Should stay 0                           |
+
+  Reference result (90 days, $0): 50k followers · 5M views ·
+  300k interactions · 500k accounts reached · 71% new viewers.
+
+  Do NOT track: follower count day-over-day (noise), likes (vanity).
+  ```
+
+### 7.5 Do not automate authenticity — automate measurement and triage only
+- **Rule:** AI builds the dashboard, the pattern detection, and the priority
+  queue. AI does not write your replies, generate your opinions, or mass-post
+  on your behalf. Draw the line at anything the audience would feel cheated
+  by if they knew.
+- **Explanation:** This is the same orchestration principle as §5.5 — you
+  decide what the AI says yes to. Automation is enormously valuable on the
+  measurement side (nobody can eyeball 90 days of engagement data and spot
+  that whiteboard beats vlog by 11x) and actively destructive on the human
+  side. Bot replies, AI-generated comment spam, and engagement pods get
+  detected by both platforms and people; the penalty is losing the exact
+  trust that made the content spread. Keep the machine on the analytics, keep
+  yourself on the conversation.
+- **Applies to:** Every content system built with AI assistance. Stacks:
+  agnostic — this is a boundary, not a tool choice. Note that most platform
+  Terms of Service explicitly ban automated engagement (X, LinkedIn,
+  Instagram), so crossing this line also risks the account itself.
+- **Example:**
+  ```
+  AI SHOULD build / do:
+    ✓ Pull engagement data from platform APIs on a schedule
+    ✓ Detect patterns by topic / format / hook / posting time
+    ✓ Rank and route notifications into a priority queue
+    ✓ Draft the *structure* of a post you then rewrite in your voice
+    ✓ Turn your own transcript into a rules doc (this file)
+    ✓ Flag comments that are spam / bot / harassment for muting
+
+  AI SHOULD NOT do:
+    ✗ Auto-reply to comments or DMs as if it were you
+    ✗ Generate opinions or "hot takes" you don't actually hold
+    ✗ Mass-comment on other accounts to farm reciprocal engagement
+    ✗ Run engagement pods or follow/unfollow loops
+    ✗ Fabricate results, screenshots, or testimonials
+    ✗ Post on your behalf without you reading it first
+
+  Test: "Would I be embarrassed if my audience saw exactly how this
+  was produced?" If yes, don't automate it.
+  ```
+
+---
+
+## 8. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
