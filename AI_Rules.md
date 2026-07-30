@@ -232,7 +232,168 @@ Branching, commits, pushes, and pull requests.
 
 ---
 
-## 5. Meta
+## 5. Infrastructure & Customer Ceiling Rules
+
+Rules for how AI-picked infrastructure choices define who you can sell to —
+and how to move up-market intentionally instead of accidentally.
+
+### 5.1 Accept the AI-picked bundled stack as your starting point
+- **Rule:** When starting a new product, let the AI default to a bundled
+  managed stack (Vercel, Netlify, Supabase, Clerk, Sentry, PlanetScale,
+  Firebase, Auth0, etc.). Do not fight this default on day one.
+- **Explanation:** These platforms come with SLAs, on-call support teams, and
+  security/compliance certifications (SOC 2, ISO 27001, GDPR postures) that
+  you cannot realistically earn on your own in under 18–24 months. The AI is
+  not being lazy — it is placing you on infrastructure that already carries
+  the operational weight a solo builder or small team can't. Starting anywhere
+  else on day one is over-engineering.
+- **Applies to:** SaaS MVPs, internal tools, indie / solo-builder products,
+  early-stage startups, any product with fewer than ~10 paying customers.
+  Stacks: Next.js on Vercel, React + Supabase, Remix + Clerk, Node/Express +
+  PlanetScale, Astro + Netlify.
+- **Example:**
+  ```
+  New idea: "Booking tool for local gyms"
+  AI-picked stack (accept):
+    - Hosting/API:  Vercel (Next.js)
+    - Auth:         Clerk
+    - Database:     Supabase (Postgres + Row Level Security)
+    - Errors:       Sentry
+    - Payments:     Stripe
+  Do NOT, on day one, spin up: AWS VPC + EKS + RDS + Cognito + your own
+  Grafana stack. That is a 3-month setup for zero customers.
+  ```
+
+### 5.2 Your first 10 customers must be SMB, not enterprise
+- **Rule:** Sell your first 10 customers to small businesses — dentists,
+  chiropractors, gyms, local agencies, solo professionals. Do not pitch
+  enterprise until after those 10.
+- **Explanation:** SMB customers care that the product works, not where your
+  servers live. They will not ask about SOC 2, VPC deployment, or data
+  residency. That means you get to learn production operations — real users,
+  real bugs, real support tickets — without simultaneously fighting enterprise
+  procurement. Builders who skip this step and chase enterprise first have no
+  operational muscle to fall back on when the deal actually lands.
+- **Applies to:** Any B2B SaaS or vertical-SaaS product. Especially relevant
+  for AI-generated products where the builder is technical but has never run
+  a support rotation. Stacks: doesn't matter — this is a go-to-market rule,
+  not a stack rule.
+- **Example:**
+  ```
+  Wrong first-10 target: Fortune 500 HR department
+    → 9-month sales cycle, security review, they want on-prem, you have
+      never handled a P1 outage. Deal dies at procurement.
+
+  Right first-10 target: 30-person dental practice, local law firm,
+                          independent physical therapist, small e-comm store
+    → 2-week sales cycle, they pay by card, you learn what actually breaks
+      in production and get referrals.
+  ```
+
+### 5.3 Enterprise is not customer #11 — it is customer #100
+- **Rule:** Do not treat enterprise as "the next tier after SMB." Treat it as
+  a separate company you have to build inside your company, over years.
+- **Explanation:** Enterprise procurement will ask, in the first call: where
+  does our data live, who owns it, who can access it, can you deploy into our
+  VPC, where is your SOC 2 Type II report, what is your DPA, what is your
+  BAA, what is your uptime SLA with financial penalties, who is your named
+  security contact. Answering "yes" to those requires owning your
+  infrastructure, having a real security program, having 24/7 on-call
+  engineers with signed support contracts, and passing a third-party audit.
+  None of that ships in a weekend. AI does not accelerate the audit calendar.
+- **Applies to:** SaaS founders eyeing Fortune 1000 logos, regulated
+  verticals (healthcare, finance, government, education), any deal where the
+  buyer has a procurement team. Stacks: this is when you start planning a
+  migration path off pure bundled-stack (e.g. Vercel → AWS/GCP with your own
+  VPC, Supabase → self-hosted Postgres or RDS, Clerk → WorkOS or in-house
+  SSO/SAML).
+- **Example:**
+  ```
+  Enterprise checklist you must answer YES to before pitching:
+    [ ] SOC 2 Type II report (12+ months of evidence)
+    [ ] Signed BAA (if healthcare) / DPA (if EU data)
+    [ ] Data residency options (US, EU, sometimes in-country)
+    [ ] VPC / private-link deployment story
+    [ ] SSO via SAML/OIDC + SCIM user provisioning
+    [ ] 24/7 on-call with a named security contact
+    [ ] Uptime SLA with credits (e.g. 99.9% with 10% credit at 99.5%)
+    [ ] Penetration test report, less than 12 months old
+  Missing any 2 of these = you are not enterprise-ready yet. Sell SMB
+  and mid-market until you can check all 8.
+  ```
+
+### 5.4 Document your customer ceiling explicitly
+- **Rule:** Maintain a written document (`CUSTOMER_CEILING.md` or similar) in
+  your repo that states, at any given moment: the largest customer size you
+  can serve today, the compliance you meet today, and what would need to
+  change to level up.
+- **Explanation:** The ceiling exists whether you write it down or not.
+  Writing it down turns it from a guessing game into a sales tool. When a
+  prospect asks a qualifying question, you either say "yes, here's the
+  attestation" or "not today — we're SMB-focused right now, here's what we
+  do serve." Both close deals. Vague answers ("uh, let me check with our
+  team") lose them.
+- **Applies to:** Any B2B product with a sales motion, especially
+  AI-generated products where the technical founder is also the salesperson.
+  Stacks: agnostic — this is a business artifact, not a code artifact.
+- **Example:**
+  ```markdown
+  # CUSTOMER_CEILING.md
+  Last updated: 2026-07-30
+
+  ## Today we can serve
+  - Size:        Up to 200-seat organizations
+  - Verticals:   Any non-regulated (no PHI, no PCI cardholder data, no
+                 classified/CJIS)
+  - Geography:   US and Canada (data hosted us-east-1 via Vercel + Supabase)
+  - Compliance:  None formal. GDPR-friendly practices, no attestation.
+
+  ## We cannot serve (yet)
+  - HIPAA-covered entities  → need BAA + self-hosted Postgres
+  - EU-only data residency  → need eu-central-1 Supabase project
+  - > 500 seats             → need SSO/SCIM, currently only email+password
+  - Enterprise procurement  → need SOC 2 Type II (est. 12 months out)
+
+  ## To lift the ceiling one notch (SMB → Mid-market)
+  - [ ] Add SAML SSO via WorkOS      (est. 2 weeks)
+  - [ ] Add SCIM provisioning        (est. 2 weeks)
+  - [ ] Start SOC 2 Type I with Vanta (est. 3 months to report)
+  ```
+
+### 5.5 An AI-directed engineer decides what to say "yes" and "not yet" to
+- **Rule:** You — not the AI — decide which prospects, features, and
+  integrations to accept. The AI's job is to build; your job is to orchestrate
+  what gets built and for whom.
+- **Explanation:** AI will happily accept every request: "sure, I can add
+  HIPAA compliance," "sure, I can deploy to your VPC," "sure, I can add SSO
+  by Friday." Each yes has a real cost the AI does not weigh — support
+  burden, security scope, refactor debt, and whether it moves your ceiling
+  in the right direction. The AI-directed engineer's job is to say "not yet"
+  to work that would break the current architecture for a customer you can't
+  yet serve at scale.
+- **Applies to:** Anyone building with AI as their primary code generator.
+  Stacks: agnostic — this is an operating discipline. Especially critical
+  when the builder is solo and every feature has an ongoing maintenance
+  cost.
+- **Example:**
+  ```
+  Prospect: "We're a hospital. Can you support us?"
+
+  Wrong (AI-default) answer:
+    "Yes! I'll add HIPAA support this week."
+    → 4 months later: half-built BAA workflow, no audit, no dedicated
+      infra, and you missed 3 SMB deals because you were rewriting auth.
+
+  Right (AI-directed) answer:
+    "Not yet — we're SMB-focused today. HIPAA is on our roadmap for Q2
+     next year once we ship SOC 2. If timing works, I'd love to talk
+     again then. Meanwhile, here's [partner] who is HIPAA-ready today."
+    → You keep the relationship, protect the roadmap, and stay honest.
+  ```
+
+---
+
+## 6. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
