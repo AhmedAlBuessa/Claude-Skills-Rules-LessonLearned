@@ -1431,7 +1431,566 @@ it never will unless you explicitly tell it to.
 
 ---
 
-## 10. Meta
+## 10. Protecting the Business Under the Product
+
+Rules for the layer nobody builds: the business protections that sit
+*underneath* the app. Source: three questions that reliably stop launch-ready
+vibe coders in their tracks —
+
+1. Do you have cyber liability insurance?
+2. Have you read your platform's terms of service?
+3. Does your privacy policy match what your app actually does?
+
+Building the product is the easy part. Protecting the business underneath it
+is where most builders never start. Start before you launch, not after.
+
+> **Not legal advice.** These rules tell you *which questions to ask* and
+> *what to direct your AI to build*. Dollar figures are indicative ranges
+> that vary by jurisdiction, revenue, and data type. For anything binding —
+> entity structure, liability exposure, breach-notification duties — get an
+> actual lawyer and an actual broker. That is itself one of the rules.
+
+### 10.1 Buy cyber liability insurance before you launch, not after the incident
+- **Rule:** If your product handles other people's data, carry cyber
+  liability insurance from day one of public launch. Get a quote *before* you
+  open signups, and treat the premium as a launch cost like your domain and
+  hosting.
+- **Explanation:** When you handle someone else's data and something goes
+  wrong, the costs land fast and they are not the costs you'd guess: breach
+  *notification* (contacting every affected user, often legally mandated),
+  forensics and remediation, legal fees, regulatory response, and any
+  damages. Indicative pricing for a small SaaS is roughly **$200–$600/year**;
+  a modest breach runs tens of thousands. Buying the policy after an incident
+  is impossible — insurance doesn't cover events that already happened.
+  Note: an LLC or corporation does provide meaningful liability separation,
+  but it is not absolute — personal negligence, personal guarantees, and
+  veil-piercing scenarios exist, and in any case the *company's* assets are
+  fully exposed. So "the LLC will absorb it" is not a plan, and the entity is
+  not a substitute for coverage.
+- **Applies to:** Any product storing user emails, payment data, files,
+  messages, health or financial info — i.e. nearly every SaaS. Especially
+  urgent for: multi-tenant B2B (one breach exposes many companies),
+  regulated verticals (§5.3), and anything an enterprise buyer will ask
+  about — they'll request your certificate of insurance during procurement.
+- **Example:**
+  ```
+  What to ask a broker for (bring this list, don't wing the call):
+
+  Coverage type        Cyber liability + technology E&O (errors & omissions)
+  First-party covers   Breach notification costs, forensics, credit
+                       monitoring for users, business interruption,
+                       ransomware/extortion, data restoration
+  Third-party covers   Claims from customers, regulatory fines &
+                       penalties (where insurable), defense costs
+  Limits               $1M/$1M is the common floor for small SaaS;
+                       enterprise contracts often *require* $1M-$5M
+  Retention/deductible Know it — a $10k retention on a $12k incident
+                       means the policy pays $2k
+  Ask explicitly       · Is a breach caused by a third-party vendor
+                         (Supabase, Stripe, AWS) covered?
+                       · Is AI-generated code excluded anywhere?
+                       · Are regulatory fines covered in your state/country?
+                       · Does it cover incidents discovered after the
+                         policy starts but caused before? (retroactive date)
+
+  Where to look: your existing business insurer, Vouch / Coalition /
+  At-Bay (tech-focused), or a local commercial broker. Get 3 quotes.
+  ```
+
+### 10.2 Treat the security audit as a coverage prerequisite, not a nice-to-have
+- **Rule:** Before applying for coverage, have the basics in place and
+  documented: vulnerability scanning, access controls, encryption at rest and
+  in transit, MFA everywhere, and backups you have actually restored from.
+  Underwriters ask; the answers determine whether you're covered and at what
+  price.
+- **Explanation:** This is the part nobody mentions. Most underwriters won't
+  write a policy — or will price it punitively — without evidence of basic
+  security hygiene, and some policies contain conditions that let the insurer
+  deny a claim if the controls you attested to weren't actually in place.
+  That reframes the whole security conversation: the audit in §8.2 isn't just
+  good practice, it's the thing that makes your insurance real. Two birds,
+  one checklist.
+- **Applies to:** Every product seeking coverage. Also doubles as the
+  groundwork for SOC 2 (§5.3) — the control list overlaps heavily, so doing
+  it once serves both. Stacks: dependency scanning (`npm audit`, Dependabot,
+  Snyk), secret scanning (`gitleaks` — §8.2), SAST (Semgrep, CodeQL), cloud
+  posture (Supabase advisors, AWS Security Hub), MFA (your identity
+  provider), encryption (managed by default on Supabase/RDS/Firebase —
+  verify, don't assume).
+- **Example:**
+  ```
+  The underwriter questionnaire, pre-answered. Fill this in BEFORE you apply:
+
+  [ ] MFA enforced on: GitHub, cloud console, database, payment provider,
+      email/domain registrar, password manager        ← registrar is the
+                                                        one people forget
+  [ ] Encryption at rest      → which service, confirmed how?
+  [ ] Encryption in transit   → TLS enforced, HSTS on, no mixed content
+  [ ] Access control          → least privilege (§8.4), no shared logins,
+                                offboarding checklist exists
+  [ ] Vulnerability scanning  → tool + cadence (e.g. Dependabot weekly,
+                                gitleaks on every commit)
+  [ ] Patch cadence           → how fast do you ship a critical CVE fix?
+  [ ] Backups                 → frequency, retention, AND the date you last
+                                did a real restore test (untested backups
+                                are not backups)
+  [ ] Incident response plan  → §8.5 runbook, with named owner
+  [ ] Logging & monitoring    → §9.4 audit log + error tracking (Sentry)
+  [ ] Employee/contractor     → who has prod access, and why each one does
+  [ ] Vendor list             → every subprocessor touching user data
+                                (needed for your privacy policy too, §10.4)
+
+  Keep this as SECURITY_POSTURE.md in the repo. Update it quarterly.
+  It answers the insurance questionnaire, the enterprise security review,
+  and the SOC 2 readiness gap analysis — all from one file.
+  ```
+
+### 10.3 Read your platform's terms — their liability is capped at roughly what you paid them
+- **Rule:** Read the limitation-of-liability clause in every platform
+  agreement you depend on before you build a business on it. Assume your
+  vendor's total exposure is capped at fees paid over the last 12 months (or
+  less), and plan for the fact that *your* exposure to your customers is not
+  capped by their contract.
+- **Explanation:** This is basic business literacy, not legal paranoia. If
+  you pay Supabase $25/month and their outage or data loss costs you
+  $10,000, their contractual liability is on the order of what you paid them
+  — your loss is yours. The asymmetry is the entire point of those clauses,
+  and every major platform has one: Supabase, Vercel, Stripe, AWS,
+  Cloudflare, Clerk, all of them. Meanwhile your own customers are suing
+  *you*, not your vendor. That gap between "vendor's cap" and "your exposure"
+  is precisely what §10.1 insurance exists to cover, and it's why you can't
+  outsource risk by outsourcing infrastructure.
+- **Applies to:** Every vendor in your critical path — hosting, database,
+  auth, payments, email, storage, LLM APIs. Read it once per vendor, at the
+  point you make it load-bearing. Especially relevant when a single vendor
+  holds all your user data (§5.1's bundled stack is convenient *and*
+  concentrated).
+- **Example:**
+  ```
+  What to actually look for (ctrl-F these terms in any ToS/MSA):
+
+  "Limitation of Liability"  → the cap. Usually "fees paid in the
+                               preceding 12 months" or a fixed small sum.
+  "Indemnification"          → note which direction it runs. Often YOU
+                               indemnify THEM, not the reverse.
+  "Service Level Agreement"  → is there one? Free/low tiers usually have
+                               NO SLA. Credits ≠ damages — a 99.9% SLA
+                               pays you a service credit, not your losses.
+  "Data Processing Addendum" → required if you have EU users. Must be
+                               signed, not assumed. Usually a separate doc.
+  "Subprocessors"            → who THEY use. These become YOUR
+                               subprocessors and must appear in your
+                               privacy policy (§10.4).
+  "Suspension / Termination" → can they cut you off, how fast, and can
+                               you export your data on the way out?
+  "Backups"                  → most platforms explicitly say backups are
+                               YOUR responsibility. Read this one twice.
+
+  Then write down the answers per vendor:
+
+  | Vendor   | Spend/mo | Liability cap   | SLA    | DPA signed | Own backups? |
+  |----------|----------|-----------------|--------|------------|--------------|
+  | Supabase | $25      | ~12mo fees      | Paid   | Yes        | YES — nightly|
+  |          |          |                 | tiers  |            | pg_dump to R2|
+  | Vercel   | $20      | ~12mo fees      | Ent.   | Yes        | n/a          |
+  | Stripe   | % fees   | see agreement   | —      | Yes        | Export weekly|
+
+  Keep it as VENDOR_RISK.md. The "Own backups?" column is the one that
+  saves you, because it's the mitigation you control.
+  ```
+
+### 10.4 Your privacy policy must describe what the app actually does
+- **Rule:** Do not ship a copied privacy-policy template. Inventory what your
+  app really collects, why, where it goes, and how long you keep it — then
+  write the policy from that inventory. The policy and the code must agree,
+  and the policy must be updated whenever the data flow changes.
+- **Explanation:** The typical failure: the app collects emails, payment
+  details, and usage analytics, while the policy is a template off the
+  internet that only mentions cookies. That mismatch is itself the violation
+  — you've made a public statement about your data practices that isn't true,
+  which is both a privacy-law problem and, in the US, a
+  deceptive-practices problem. The related trap is promising rights you
+  cannot deliver: if a European user exercises their GDPR erasure right and
+  your database was never built for deletion, you have a compliance violation
+  with real fines attached. Your AI can draft the policy competently — but
+  only from requirements you supply, and it cannot know what your app
+  collects unless you make it read the schema.
+- **Applies to:** Every product with users. Legally sharpest for EU/EEA and
+  UK users (GDPR), California (CCPA/CPRA), Brazil (LGPD), Canada (PIPEDA),
+  and children's products (COPPA). Stacks: your policy must name real
+  subprocessors — Supabase/AWS (hosting), Stripe (payments), Resend/Postmark
+  (email), PostHog/Mixpanel (analytics), Sentry (error tracking — note it can
+  capture PII in payloads), Anthropic/OpenAI (if you send user content to an
+  LLM, that is a disclosure you must make).
+- **Example:**
+  ```
+  Direct your AI like this — the inventory FIRST, the policy SECOND:
+
+  "Read the Prisma schema and every API route in this repo. Produce a data
+   inventory table: field, table, why collected, legal basis, who it's
+   shared with, retention period. Flag any field we collect but never
+   use. Then draft a privacy policy from THAT table only — do not
+   include boilerplate about data we don't collect."
+
+  Data inventory (the artifact that makes the policy honest):
+
+  | Data              | Where           | Why           | Shared with      | Kept    |
+  |-------------------|-----------------|---------------|------------------|---------|
+  | Email             | users.email     | Auth, receipts| Resend (email)   | Account+30d |
+  | Name              | users.name      | Personalization| —               | Account+30d |
+  | Card last4/brand  | Stripe only     | Billing UI    | Stripe           | 7y (§6.3)|
+  | Payment history   | payments        | Tax/legal     | Stripe           | 7y (IRS) |
+  | IP address        | audit_log.ip    | Security/fraud| —                | 1y      |
+  | Usage events      | PostHog         | Product analytics| PostHog       | 14mo    |
+  | Error payloads    | Sentry          | Debugging     | Sentry           | 90d     |
+  | Prompt content    | → Anthropic API | AI feature    | Anthropic        | Not stored |
+
+  ⚠ We do NOT collect: SSN, precise geolocation, biometrics, health data,
+    contacts, or advertising identifiers. Say so — it's a selling point.
+
+  Then verify the three things that must line up:
+    [ ] Every row above appears in the privacy policy
+    [ ] Nothing in the privacy policy is absent from the table
+    [ ] Retention column matches RETENTION_SCHEDULE.md exactly (§6.3)
+  ```
+  ```
+  The rights you promise must be implemented, not just written:
+
+  Right                     Must exist in code
+  ────────────────────────  ──────────────────────────────────────────
+  Access / export           An endpoint that returns everything you
+                            hold on a user, in a portable format
+  Erasure ("right to be     The §6.1 policy-engine deletion flow —
+   forgotten")              NOT a raw DELETE, and it must be able to
+                            explain what is legally retained and why
+  Rectification             The user can correct their own data
+  Portability               Machine-readable export (JSON/CSV)
+  Object / restrict         A way to turn off analytics/marketing
+  Withdraw consent          Un-ticking must actually stop the processing
+
+  If the policy claims a right your code can't perform, the policy is
+  a liability, not a protection. Build the endpoint or drop the claim.
+  ```
+
+### 10.5 Run a pre-launch business-protection gate
+- **Rule:** Add a launch gate that is separate from your technical readiness
+  checklist. The product being finished is not the same as the business being
+  ready. Do not open public signups until the business layer is in place.
+- **Explanation:** Every item in this section is cheap and fast *before*
+  launch and expensive or impossible *after* an incident. Insurance can't be
+  bought retroactively, a privacy policy can't be corrected backwards for
+  users who already signed up under the old one, and a liability cap can't be
+  renegotiated once you're in a dispute. Most builders learn the requirements
+  from their first incident — the gate exists so you learn them from a
+  checklist instead. It's a business, not just a build.
+- **Applies to:** Every launch, including "soft" launches and paid betas —
+  the moment money or real user data is involved, all of this applies.
+  Stacks: agnostic. Keep it as `LAUNCH_READINESS.md` next to the technical
+  checklist from §6.5.
+- **Example:**
+  ```markdown
+  # LAUNCH_READINESS.md — Business layer
+
+  ## Legal entity & insurance
+  - [ ] Entity formed (LLC/Ltd/Corp) and separate business bank account
+  - [ ] Cyber liability + tech E&O quote obtained (3 quotes compared)
+  - [ ] Policy bound and certificate of insurance saved  ← before signups
+  - [ ] SECURITY_POSTURE.md complete (§10.2) — underwriter answered
+
+  ## Vendor & contract literacy
+  - [ ] VENDOR_RISK.md filled in for every critical vendor (§10.3)
+  - [ ] DPA signed with each vendor processing user data
+  - [ ] Own backups running for anything a vendor won't back up
+  - [ ] Verified a real restore from backup (with a date written down)
+
+  ## Customer-facing legal
+  - [ ] Data inventory table produced from the actual schema (§10.4)
+  - [ ] Privacy policy written FROM the inventory — no template text
+  - [ ] Terms of Service with YOUR OWN limitation-of-liability clause
+        (you are the vendor now — you need the same protection §10.3
+         describes, drafted by a lawyer)
+  - [ ] Subprocessor list published and accurate
+  - [ ] Cookie/consent banner only if you actually set those cookies
+  - [ ] Refund policy that matches what Stripe is configured to do
+
+  ## Rights implemented in code
+  - [ ] Data export endpoint works end to end
+  - [ ] Deletion flow routes through the retention engine (§6.1)
+  - [ ] RETENTION_SCHEDULE.md matches the privacy policy word for word
+  - [ ] Audit log captures consent changes (§9.4)
+
+  ## Reviewed by a human professional
+  - [ ] Lawyer reviewed ToS + privacy policy (not a template generator)
+  - [ ] Accountant/tax advisor aware of the revenue model
+  - [ ] Broker understands what the product actually does
+
+  Rule: any unchecked box above is a launch blocker, not a backlog item.
+  ```
+
+---
+
+## 11. Dynamic Secrets & Credential Lifecycle
+
+Rules for the credentials themselves. The starting condition this fixes:
+**static database credentials — the same username and password for the last
+six months.** If they leak, every query in your system is compromised until
+you notice and change them by hand.
+
+The goal is to shrink the blast radius of a leak from *infinite* to *one
+session*.
+
+> Related: §8.4 is about **scoping** a credential (least privilege). This
+> section is about its **lifetime** (short) and its **traceability** (logged).
+> Scope limits what a leaked key can do; lifetime limits how long it can do
+> it. You want both.
+
+### 11.1 Stop using static, long-lived credentials — generate them on demand
+- **Rule:** Application credentials should be generated per session and
+  expire automatically. Deploy a secrets engine that issues short-lived
+  dynamic credentials rather than storing one permanent username/password
+  that every process shares forever.
+- **Explanation:** A static credential has an unbounded exposure window — it
+  works from the moment it leaks until a human notices and manually rotates
+  it, which historically means months. A dynamic credential is created when
+  the app asks for it, lives for something like an hour, and then dies. There
+  is no permanent secret sitting in an env var to steal, so a leaked
+  credential is worthless shortly after it's captured. This also fixes the
+  thing that makes manual rotation never happen: rotation stops being a
+  scary coordinated event and becomes the normal, continuous behavior of the
+  system.
+- **Applies to:** Databases (Postgres/MySQL dynamic roles), cloud APIs, message
+  queues, internal service-to-service auth. Stacks: HashiCorp Vault
+  (database secrets engine), Infisical, Doppler, AWS Secrets Manager +
+  RDS IAM authentication, GCP Secret Manager + Workload Identity, Azure Key
+  Vault + Managed Identity, Kubernetes with the Vault Agent Injector or
+  External Secrets Operator.
+- **Example:**
+  ```hcl
+  # Vault: database secrets engine issuing 1-hour Postgres credentials
+  vault secrets enable database
+
+  vault write database/config/app-postgres \
+      plugin_name=postgresql-database-plugin \
+      allowed_roles="api-server,analytics,worker" \
+      connection_url="postgresql://{{username}}:{{password}}@db.internal:5432/app" \
+      username="vault-root-rotator" password="<rotated-immediately-after>"
+
+  # Rotate the root credential so even YOU no longer know it
+  vault write -f database/rotate-root/app-postgres
+
+  vault write database/roles/api-server \
+      db_name=app-postgres \
+      default_ttl="1h" max_ttl="4h" \
+      creation_statements=<<EOF
+        CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '{{password}}'
+          VALID UNTIL '{{expiration}}';
+        GRANT SELECT, INSERT, UPDATE, DELETE ON app.orders, app.customers
+          TO "{{name}}";
+      EOF
+  ```
+  ```typescript
+  // App side: ask for credentials, use them, let them expire. Never cache
+  // them to disk, never bake them into the image, never log them.
+  async function getDbCredentials() {
+    const res = await vault.read('database/creds/api-server');
+    return {
+      user: res.data.username,          // e.g. v-api-serv-x7f2k9
+      password: res.data.password,
+      expiresInSec: res.lease_duration, // 3600
+    };
+  }
+  // Renew or re-request before expiry; on 401 from the DB, fetch fresh
+  // credentials and retry once — that IS the rotation, automatically.
+  ```
+
+### 11.2 Scope credentials per service — least privilege enforced by the engine, not by trust
+- **Rule:** Every service gets its own credential with only the permissions
+  that service needs. API server: read/write on its tables. Analytics:
+  read-only. Background worker: the job queue and nothing else. Enforce it in
+  the secrets engine's role definitions, not in a code convention.
+- **Explanation:** One shared credential means every service is as privileged
+  as the most privileged one, so a leak anywhere is a full compromise
+  everywhere. Per-service roles turn one blast radius into several small
+  ones — and critically, the enforcement lives outside the application code.
+  "The analytics service only reads" is a hope when it's a code convention
+  and a fact when the database role has no `INSERT` grant. It also gives you
+  attribution for free: when a query misbehaves, the credential name tells
+  you which service issued it.
+- **Applies to:** Any system with more than one process touching the
+  database — API + worker + cron + analytics is the common minimum. Stacks:
+  Vault database roles (per-role `creation_statements`), AWS IAM roles per
+  service (one task role per ECS service, never a shared one), Postgres roles
+  + `GRANT`, Supabase (`anon` vs `service_role` is the two-role starter
+  version of this idea).
+- **Example:**
+  ```hcl
+  # One role per service. Different grants, different TTLs.
+
+  # API server — read/write, only its own tables
+  vault write database/roles/api-server db_name=app-postgres \
+    default_ttl="1h" creation_statements=<<EOF
+      CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '{{password}}'
+        VALID UNTIL '{{expiration}}';
+      GRANT SELECT, INSERT, UPDATE, DELETE
+        ON app.orders, app.customers, app.sessions TO "{{name}}";
+    EOF
+
+  # Analytics — READ ONLY, longer TTL is fine, lower risk
+  vault write database/roles/analytics db_name=app-postgres \
+    default_ttl="8h" creation_statements=<<EOF
+      CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '{{password}}'
+        VALID UNTIL '{{expiration}}';
+      GRANT SELECT ON ALL TABLES IN SCHEMA analytics TO "{{name}}";
+      -- deliberately NO grant on app.* — cannot read raw PII
+    EOF
+
+  # Worker — job queue only. Cannot touch customers or orders at all.
+  vault write database/roles/worker db_name=app-postgres \
+    default_ttl="1h" creation_statements=<<EOF
+      CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '{{password}}'
+        VALID UNTIL '{{expiration}}';
+      GRANT SELECT, UPDATE, DELETE ON app.job_queue TO "{{name}}";
+    EOF
+  ```
+  ```
+  Blast radius comparison — the whole point of the section:
+
+  Static shared credential leaks
+    → attacker has read/write on everything, indefinitely.
+      Exposure: ALL data × FOREVER.
+
+  Scoped dynamic credential for `analytics` leaks
+    → attacker has read-only on aggregate tables, for < 8 hours,
+      and the access shows up in the audit log under a credential
+      name that identifies exactly which service leaked.
+      Exposure: ONE dataset × ONE session.
+  ```
+
+### 11.3 Audit-log every secret access — who, when, from where, for what
+- **Rule:** Enable audit logging on the secrets engine itself. Every
+  credential request must record the requesting identity, timestamp, source
+  IP, target service/role, and the lease issued. Ship those logs somewhere
+  the application cannot modify them.
+- **Explanation:** Dynamic secrets shrink the window; the audit log tells you
+  what happened inside it. Without it, a suspected compromise leaves you
+  guessing — you can't say which service was affected, when access began, or
+  whether the credential was used at all. With it, you have a complete trail:
+  "this role was requested 400 times from an IP outside our VPC starting at
+  02:14." That converts an open-ended incident into a scoped one, which is
+  exactly what §8.5's runbook needs in order to move fast. Same reasoning as
+  §9.4 — the action without the receipt is unverifiable.
+- **Applies to:** Every secrets engine deployment. Stacks: Vault audit
+  devices (`file`, `syslog`, `socket`), AWS CloudTrail for Secrets Manager
+  `GetSecretValue` calls, GCP Cloud Audit Logs, Azure Key Vault diagnostic
+  logs. Ship to an append-only sink: S3/R2 with Object Lock, CloudWatch with
+  a retention policy, or your SIEM (Datadog, Splunk, Grafana Loki).
+- **Example:**
+  ```bash
+  # Vault: enable an audit device. Vault REFUSES to serve requests if all
+  # audit devices fail — that's deliberate. Never disable it to fix an outage.
+  vault audit enable file file_path=/vault/logs/audit.log
+  vault audit enable -path=siem socket \
+      address=logs.internal:9000 socket_type=tcp
+
+  # Ship to append-only storage; the app role has no delete permission.
+  ```
+  ```json
+  // What a single credential request looks like in the trail
+  {
+    "time": "2026-07-30T02:14:07Z",
+    "type": "response",
+    "auth": {
+      "display_name": "api-server",
+      "policies": ["api-server-policy"],
+      "client_token_accessor": "hmac-sha256:9f2c…"
+    },
+    "request": {
+      "operation": "read",
+      "path": "database/creds/api-server",
+      "remote_address": "10.0.3.44"
+    },
+    "response": {
+      "data": { "username": "hmac-sha256:1a4b…" },  // ← value HMAC'd,
+      "lease_duration": 3600                        //   never plaintext
+    }
+  }
+  ```
+  ```
+  Alerts worth wiring up on day one (the log is only useful if it's watched):
+    · Credential requested from an IP outside the expected CIDR
+    · Request rate for one role spikes above its normal baseline
+    · A role is requested by an identity that has never requested it before
+    · Any use of a root/admin token or a break-glass credential
+    · An audit device fails to write            ← treat as an incident
+    · A lease is revoked or a policy is changed outside a deploy window
+
+  Then answer this in a drill, before you need it for real:
+    "Credential X may have leaked at 02:00. Which service, which data,
+     how many requests, from where, and is it already expired?"
+    If the log can't answer that in five minutes, it isn't finished.
+  ```
+
+### 11.4 If a secrets engine is too heavy today, climb the ladder — don't stay static
+- **Rule:** Running Vault is not the day-one move for a solo builder. But
+  "static credentials, unrotated, shared by everything" is never acceptable.
+  Pick the highest rung you can actually operate today, write down which rung
+  you're on, and set a trigger for moving up.
+- **Explanation:** This is §5.1's principle applied to secrets — take the
+  managed option that fits your current scale rather than the most
+  sophisticated one. A self-hosted Vault you can't operate is worse than a
+  cloud secrets manager you can, because an unavailable secrets engine is a
+  full outage. The failure to avoid isn't "didn't deploy Vault," it's
+  "never moved off the six-month-old shared password." Every rung below
+  shrinks the blast radius over the one before it, and moving up a rung is a
+  contained afternoon of work — as long as you know which rung you're on.
+- **Applies to:** Every project, at every stage. Stacks named per rung below.
+  Cross-check with §5.4 — your credential rung is part of your customer
+  ceiling, because enterprise security reviews ask about it directly.
+- **Example:**
+  ```
+  The ladder — find your rung, know your trigger to climb:
+
+  Rung 0  ✗ NEVER ACCEPTABLE
+          Credentials in git, or in a shared doc, or the same password
+          across dev and prod. → Fix today. §8.3, §9.2.
+
+  Rung 1  Baseline (solo builder, pre-revenue)
+          · Secrets in the host's env-var store (Vercel/Fly/Railway),
+            scoped per environment (§9.2)
+          · Separate credentials per environment, none in git
+          · Scoped/restricted keys wherever the provider offers them (§8.4)
+          · A calendar reminder to rotate quarterly — and you actually do it
+          Trigger to climb → first paying customer, or a second engineer
+
+  Rung 2  Managed secrets manager (first customers, small team)
+          · AWS/GCP/Azure Secrets Manager, Doppler, or Infisical
+          · Automatic rotation enabled where supported
+          · Per-service credentials (§11.2) even if still long-lived
+          · Access to the secrets store is itself logged (§11.3)
+          Trigger to climb → multiple services, or an enterprise deal, or
+                             any regulated data (§5.3, §6.3)
+
+  Rung 3  Dynamic secrets (multi-service, enterprise-bound)
+          · Vault / Infisical dynamic secrets, or cloud-native workload
+            identity (RDS IAM auth, GCP Workload Identity) so there is
+            no long-lived credential at all
+          · Per-session TTLs (§11.1), per-service roles (§11.2),
+            full audit trail (§11.3)
+          · Break-glass credential sealed, and its use alerts loudly
+
+  Write it down so it's answerable without thinking:
+
+  # SECRETS_POSTURE.md
+  Current rung:   2 (Doppler, per-env, per-service, 90-day rotation)
+  Static creds:   database root only — sealed, break-glass, alerts on use
+  Longest-lived:  Stripe restricted key, rotated quarterly
+  Next rung at:   first enterprise contract requiring dynamic credentials
+  Last rotation:  2026-07-15    Next due: 2026-10-15
+  ```
+
+---
+
+## 12. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
