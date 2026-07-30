@@ -393,7 +393,243 @@ and how to move up-market intentionally instead of accidentally.
 
 ---
 
-## 6. Meta
+## 6. Data Retention & Deletion Rules
+
+Rules for how to handle "delete my account" requests when federal / state law
+says you actually have to keep some of the data. AI defaults to "delete
+means delete" — that can put you in violation of retention laws in finance,
+healthcare, tax, and legal domains.
+
+### 6.1 "Delete my account" does not mean "delete all data"
+- **Rule:** Never wire a "delete account" button directly to a `DELETE FROM
+  users WHERE id = ?` (or equivalent cascade). Route it through a retention
+  policy that splits data into two buckets: (a) user-controlled data → delete
+  or anonymize, (b) legally-retained data → keep in a separate retention
+  layer with an expiration date.
+- **Explanation:** Federal and state law can require you to retain certain
+  records — payment history, medical records, tax-related transactions,
+  KYC/AML records, some legal agreements — for up to 7 years after the
+  customer relationship ends. If your user hits "delete" and your AI-written
+  code obediently wipes everything, you've broken the law even though the
+  user asked for it. The user does not override the regulator. Your app has
+  to know the difference and treat the two categories separately.
+- **Applies to:** FinTech, HealthTech (HIPAA), tax/accounting SaaS, LegalTech,
+  insurance, real estate escrow, any B2C product that processes payments,
+  any B2B product touching regulated data. Stacks: Postgres/MySQL/MongoDB
+  apps on Supabase, RDS, PlanetScale, Firebase, or self-hosted. Especially
+  relevant to Next.js + Supabase / Prisma-style apps where a `user.delete()`
+  cascade feels innocent.
+- **Example:**
+  ```typescript
+  // WRONG — AI's default "delete account" implementation
+  async function deleteAccount(userId: string) {
+    await db.users.delete({ where: { id: userId } });
+    // → cascades wipe payments, invoices, medical notes, everything.
+    // → you just broke IRS §6001, HIPAA §164.530, or FINRA 4511.
+  }
+
+  // RIGHT — split by data category
+  async function deleteAccount(userId: string) {
+    // (a) User-controlled data: hard delete or anonymize
+    await db.userProfile.delete({ where: { userId } });
+    await db.userPreferences.delete({ where: { userId } });
+    await db.sessions.deleteMany({ where: { userId } });
+
+    // (b) Legally-retained data: move to retention layer, DO NOT DELETE
+    await db.retainedRecords.create({
+      userId,
+      category: 'financial_transactions',
+      data: await db.payments.findMany({ where: { userId } }),
+      retentionUntil: addYears(new Date(), 7), // IRS: 7 years
+      reason: 'IRS §6001 record retention',
+    });
+    await db.payments.updateMany({
+      where: { userId },
+      data: { anonymizedAt: new Date(), userId: null }, // strip PII, keep record
+    });
+
+    // (c) Audit trail
+    await db.retentionAuditLog.create({
+      userId, action: 'account_deletion',
+      retained: ['financial_transactions'],
+      deleted: ['profile', 'preferences', 'sessions'],
+      timestamp: new Date(),
+    });
+  }
+  ```
+
+### 6.2 Build a data retention policy engine, not a boolean flag
+- **Rule:** Model retention as a first-class system with (data_category,
+  retention_period, jurisdiction, expiration_date, action_on_expiry).
+  Never use a single `is_deleted` or `status = 'active' | 'deleted'` column
+  to represent both user intent and legal state.
+- **Explanation:** A boolean can't answer "why is this row still here?" or
+  "when can it actually be purged?" A retention engine can. Every retained
+  record needs to know which law is keeping it alive, when the clock started,
+  when it expires, and what happens on expiry (hard delete vs. archive vs.
+  anonymize). Otherwise, in year 8, nobody remembers why the data is still
+  there — and you either keep it forever (privacy violation) or delete it
+  early (compliance violation).
+- **Applies to:** Any product storing user data past account closure. Stacks:
+  Postgres (leverage `CHECK` constraints + partial indexes on
+  `retention_until`), any ORM (Prisma, Drizzle, TypeORM, SQLAlchemy),
+  event-sourced systems, data warehouses (BigQuery, Snowflake — same rules
+  apply to your analytics tables).
+- **Example:**
+  ```sql
+  -- Retention policy table (declares WHAT is kept and WHY)
+  CREATE TABLE retention_policies (
+    id                 SERIAL PRIMARY KEY,
+    data_category      TEXT NOT NULL,      -- 'payment', 'medical', 'tax'
+    jurisdiction       TEXT NOT NULL,      -- 'US-federal', 'US-CA', 'EU'
+    retention_years    INT NOT NULL,       -- 7, 10, etc.
+    legal_basis        TEXT NOT NULL,      -- 'IRS §6001', 'HIPAA §164.530'
+    action_on_expiry   TEXT NOT NULL       -- 'hard_delete' | 'archive'
+      CHECK (action_on_expiry IN ('hard_delete', 'archive', 'anonymize'))
+  );
+
+  -- Retained records (each row knows its own expiry)
+  CREATE TABLE retained_records (
+    id                 UUID PRIMARY KEY,
+    original_user_id   UUID,               -- nullable if anonymized
+    policy_id          INT REFERENCES retention_policies(id),
+    payload            JSONB NOT NULL,
+    retained_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at         TIMESTAMPTZ NOT NULL,  -- pre-computed
+    purged_at          TIMESTAMPTZ            -- filled when expiry runs
+  );
+
+  CREATE INDEX ON retained_records (expires_at) WHERE purged_at IS NULL;
+  ```
+
+### 6.3 Map the retention schedule to your ACTUAL obligations — do not guess
+- **Rule:** Before shipping, direct your AI to research retention requirements
+  for your specific industry, state/country, and record type. Write the
+  findings into a `RETENTION_SCHEDULE.md` in the repo. Do not use "7 years
+  for everything" as a lazy default.
+- **Explanation:** Retention periods are not universal. Payment records,
+  medical records, employment records, user communications, and marketing
+  consent logs all have different clocks — sometimes 3, 6, 7, 10, or lifetime.
+  The AI will not research this unprompted because it does not know your
+  industry, your state, or your customer base. You have to tell it, and it
+  has to write down what it found (with citations) so a future you or auditor
+  can trace the decision.
+- **Applies to:** Every regulated vertical. Especially FinTech (SOX, FINRA,
+  IRS, state money-transmitter laws), HealthTech (HIPAA + state), EU
+  operators (GDPR Art. 5(1)(e) — storage limitation), CA (CCPA/CPRA),
+  employment/HR products (state labor codes), education (FERPA), children's
+  products (COPPA). Stacks: agnostic — this is a policy artifact that
+  informs code.
+- **Example:**
+  ```markdown
+  # RETENTION_SCHEDULE.md
+  Last reviewed: 2026-07-30  |  Next review: 2027-01-30
+
+  | Data category          | Retention | Legal basis            | On expiry   |
+  |------------------------|-----------|------------------------|-------------|
+  | Payment transactions   | 7 years   | IRS §6001              | Anonymize   |
+  | Invoices / receipts    | 7 years   | IRS §6001, state tax   | Anonymize   |
+  | Medical / PHI records  | 6 years   | HIPAA §164.530(j)(2)   | Hard delete |
+  | KYC / AML documents    | 5 years   | FinCEN 31 CFR 1010.430 | Hard delete |
+  | User marketing consent | Lifetime+3yr after opt-out | CAN-SPAM  | Hard delete |
+  | Support tickets        | 2 years   | Internal policy        | Hard delete |
+  | Server access logs     | 90 days   | Internal policy        | Hard delete |
+  | Session cookies        | On logout | GDPR Art. 5(1)(e)      | Hard delete |
+
+  ## Jurisdictions in scope
+  - US-federal (all customers)
+  - US-California (CCPA/CPRA)
+  - EU/EEA (GDPR) — only if EU customer flag = true
+
+  ## What we do NOT collect (and therefore do not need to retain)
+  - SSN, driver's license numbers, biometrics
+  ```
+
+### 6.4 Every retention/deletion action must produce an audit trail
+- **Rule:** Log every retention event — record retained, record anonymized,
+  record purged, policy applied — in an append-only audit table (or an
+  immutable log stream). Include: `who` (user/system), `what` (record id +
+  category), `when` (timestamp), `why` (policy id + legal basis).
+- **Explanation:** A retention policy without a paper trail is a promise you
+  can't prove. When a regulator, auditor, or plaintiff asks "show me exactly
+  what happened to Ahmed's account when he deleted it in 2024," you need to
+  produce a timeline. Without it, your defense is "trust us, we followed the
+  policy" — which is not a defense. Your AI can build the logger in an
+  afternoon; the cost of skipping it is measured in fines.
+- **Applies to:** Same regulated verticals as 6.1. Also relevant for any
+  product with a Terms of Service or Privacy Policy that promises specific
+  retention behavior — because your promise is now enforceable. Stacks:
+  append-only tables in Postgres (revoke `UPDATE`/`DELETE` from the app
+  role), event streams (Kafka, EventBridge), immutable log stores (S3 with
+  Object Lock, Cloudflare R2 Object Lock, dedicated audit services like
+  Vanta / Drata event log).
+- **Example:**
+  ```sql
+  -- Append-only audit log; app role only has INSERT + SELECT
+  CREATE TABLE retention_audit_log (
+    id             BIGSERIAL PRIMARY KEY,
+    actor          TEXT NOT NULL,        -- 'user:<uuid>' | 'system:cron'
+    action         TEXT NOT NULL,        -- 'retain' | 'anonymize' | 'purge'
+    record_type    TEXT NOT NULL,        -- 'payment' | 'medical_note'
+    record_id      UUID NOT NULL,
+    policy_id      INT REFERENCES retention_policies(id),
+    legal_basis    TEXT NOT NULL,
+    occurred_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    details        JSONB
+  );
+
+  REVOKE UPDATE, DELETE ON retention_audit_log FROM app_role;
+  GRANT INSERT, SELECT ON retention_audit_log TO app_role;
+  ```
+  ```
+  Example query when a regulator asks "what happened to user X's data?":
+
+  SELECT occurred_at, action, record_type, legal_basis
+  FROM retention_audit_log
+  WHERE actor = 'user:<X-uuid>'
+     OR details->>'original_user_id' = '<X-uuid>'
+  ORDER BY occurred_at;
+
+  → produces the full timeline. Done.
+  ```
+
+### 6.5 Research retention obligations BEFORE the first user asks to leave
+- **Rule:** Do the retention research during initial product design, not the
+  first time a user hits "delete account." Add a checklist item to your
+  launch gate: "RETENTION_SCHEDULE.md exists, has been reviewed against our
+  industry, and the deletion flow implements it."
+- **Explanation:** The first "delete my account" request will come sooner
+  than you think, often within the first week of launch. If your deletion
+  flow is not law-aware on day one, you have exactly two bad options:
+  (a) delete everything and hope no regulator noticed, or (b) refuse the
+  deletion and hope the user doesn't file a GDPR/CCPA complaint. Both cost
+  more than a one-afternoon research task done up front. The AI can research
+  the requirements for you — but only if you ask.
+- **Applies to:** Every new product build. Especially critical for
+  AI-generated MVPs where the "delete account" endpoint is scaffolded
+  automatically by the framework or template. Stacks: any auth template
+  (Clerk, Supabase Auth, Auth.js, Firebase Auth) that ships with a
+  ready-made "delete account" flow — those flows are jurisdiction-neutral
+  by default and will happily nuke everything.
+- **Example:**
+  ```
+  Pre-launch checklist (add to your repo's LAUNCH_READINESS.md):
+
+  Data retention
+  [ ] Industry identified:     ______________________
+  [ ] Jurisdictions in scope:  ______________________
+  [ ] RETENTION_SCHEDULE.md written and reviewed
+  [ ] retention_policies table seeded with rows for each category
+  [ ] Deletion endpoint routes to policy engine (not raw DELETE)
+  [ ] retention_audit_log table exists and is append-only
+  [ ] Cron job scheduled to purge records past expires_at
+  [ ] Privacy Policy text matches RETENTION_SCHEDULE.md exactly
+  [ ] Reviewed by a lawyer (yes, actually — before enterprise deals)
+  ```
+
+---
+
+## 7. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
