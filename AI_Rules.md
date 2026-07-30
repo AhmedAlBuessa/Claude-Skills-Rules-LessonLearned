@@ -1109,7 +1109,329 @@ rotation, and customer apologies.
 
 ---
 
-## 9. Meta
+## 9. The Three Gaps in Almost Every AI-Built App
+
+Rules from a pattern found across 2,000+ audited builder apps. Every one of
+them built something that **works**. Almost none built anything that
+**protects** it. The same three gaps appeared nearly every time:
+
+1. No error handling beyond the default
+2. No environment separation (dev and prod sharing a database and keys)
+3. No audit trail on sensitive actions
+
+The root cause is the same for all three: **AI builds the happy path.** It
+does not build the unhappy path, the safety boundary, or the receipts — and
+it never will unless you explicitly tell it to.
+
+> Related: §6.4 covers the audit trail for *retention/deletion* specifically.
+> §9.4 below is the broader rule — receipts on every sensitive action.
+
+### 9.1 Build the unhappy path — your users live there more than you think
+- **Rule:** Every feature ships with its failure states designed, not
+  defaulted. No white screens, no raw stack traces, no bare `500`. Every
+  error the user can hit must say what happened, what it means, and what to
+  do next — plus a reference ID they can send you.
+- **Explanation:** AI writes the happy path because that's what the prompt
+  described. When it fails, the user gets whatever the framework does by
+  default — a blank page, a JSON blob, "Something went wrong." That's the
+  moment you lose the customer, and it happens far more often than the demo
+  suggests: expired sessions, offline networks, rate limits, third-party
+  outages, validation the user doesn't understand, a payment decline. Users
+  spend a surprising share of their time on the unhappy path, and it's the
+  only part of your app that is entirely unbuilt.
+- **Applies to:** Every app, but the visible-damage version is web/mobile
+  front-ends. Stacks: React (error boundaries), Next.js
+  (`error.tsx`/`not-found.tsx`/`global-error.tsx`), Remix (`ErrorBoundary`),
+  SvelteKit (`+error.svelte`), Vue (`onErrorCaptured`), Flutter
+  (`ErrorWidget.builder`), plus API layers (Express/FastAPI/Hono error
+  middleware) and background jobs (retry + dead-letter queues).
+- **Example:**
+  ```tsx
+  // WRONG — AI's default. Fails silently or crashes the whole tree.
+  function Invoices() {
+    const { data } = useQuery(['invoices'], fetchInvoices);
+    return <ul>{data.map(i => <li key={i.id}>{i.total}</li>)}</ul>;
+    //            ^^^^ undefined on error → white screen of death
+  }
+
+  // RIGHT — every state is designed
+  function Invoices() {
+    const { data, error, isLoading, refetch } =
+      useQuery(['invoices'], fetchInvoices);
+
+    if (isLoading) return <InvoicesSkeleton />;              // loading
+    if (error)     return <ErrorState                        // failure
+        title="We couldn't load your invoices"
+        detail="This is usually a temporary connection issue."
+        action={{ label: 'Try again', onClick: refetch }}
+        reference={error.requestId}   // ← user can quote this to support
+      />;
+    if (!data.length) return <EmptyState                     // empty
+        title="No invoices yet"
+        detail="Invoices appear here after your first payment."
+      />;
+    return <ul>{data.map(i => <li key={i.id}>{i.total}</li>)}</ul>;
+  }
+  ```
+  ```typescript
+  // API side: structured, actionable, correlated — never a bare 500
+  app.use((err, req, res, next) => {
+    const requestId = req.id ?? crypto.randomUUID();
+    logger.error({ requestId, err, path: req.path, userId: req.user?.id });
+
+    const known = {
+      RATE_LIMITED:    [429, "You're doing that too quickly. Wait a minute and retry."],
+      CARD_DECLINED:   [402, "Your bank declined the card. Try another payment method."],
+      SESSION_EXPIRED: [401, "Your session expired. Please sign in again."],
+      NOT_FOUND:       [404, "We couldn't find that. It may have been deleted."],
+    }[err.code];
+
+    const [status, message] = known ?? [500,
+      "Something broke on our end. We've been notified."];
+
+    res.status(status).json({ error: { code: err.code ?? 'INTERNAL', message, requestId } });
+    //  ↑ never leak err.message or a stack trace to the client (see §3.1)
+  });
+  ```
+  ```
+  Checklist — for EVERY feature, name these four states before shipping:
+    [ ] Loading   — skeleton or spinner, never a layout jump
+    [ ] Empty     — explains how to get the first item, not "No data"
+    [ ] Error     — what happened + what to do + a reference ID
+    [ ] Partial   — some data loaded, some failed (don't fail the whole page)
+  ```
+
+### 9.2 Never share a database, API key, or config between development and production
+- **Rule:** Development, staging, and production get **separate databases,
+  separate API keys, and separate configuration**. One wrong query in dev must
+  be incapable of touching a paying customer. Verify the separation exists —
+  don't assume the platform set it up.
+- **Explanation:** AI does not know the difference between a test environment
+  and a live one. It reads one connection string from one `.env` and uses it
+  everywhere, because that's what it was given. The failure isn't
+  hypothetical: a `DELETE FROM users` you meant to run locally, a migration
+  tested "safely," a seed script that truncates tables — all land directly on
+  production users, instantly, with no undo. This is the cheapest of the three
+  gaps to close and the most expensive to leave open.
+- **Applies to:** Every app with a database or a third-party API. Stacks:
+  Supabase (separate *projects* per env, or branch databases), Neon/PlanetScale
+  (branches), RDS (separate instances), Firebase (separate projects), Stripe
+  (test-mode `sk_test_` vs live `sk_live_` — never the same key), Clerk/Auth0
+  (separate dev/prod instances), Vercel/Netlify (per-environment env vars:
+  Production / Preview / Development scopes).
+- **Example:**
+  ```
+  WRONG — one .env, one database, one set of keys
+    .env
+      DATABASE_URL=postgres://...prod-db.../app     ← used by localhost too
+      STRIPE_SECRET_KEY=sk_live_...                 ← real charges from dev
+    → `pnpm db:seed` on your laptop wipes production. Ask me how I know.
+
+  RIGHT — hard separation, enforced by different values in different places
+    Local (.env.local, gitignored):
+      DATABASE_URL=postgres://localhost:5432/app_dev
+      STRIPE_SECRET_KEY=sk_test_...
+      APP_ENV=development
+
+    Preview/staging (host dashboard → Preview scope):
+      DATABASE_URL=<staging branch DB>
+      STRIPE_SECRET_KEY=sk_test_...
+      APP_ENV=staging
+
+    Production (host dashboard → Production scope ONLY):
+      DATABASE_URL=<prod DB>
+      STRIPE_SECRET_KEY=rk_live_...    ← restricted, see §8.4
+      APP_ENV=production
+  ```
+  ```typescript
+  // Add a guard rail so a mistake fails loudly instead of silently landing.
+  // Put this at the top of every destructive script (seed, reset, truncate):
+  if (process.env.APP_ENV === 'production') {
+    throw new Error('Refusing to run destructive script against production.');
+  }
+  if (process.env.DATABASE_URL?.includes('prod')) {
+    throw new Error('DATABASE_URL points at production. Aborting.');
+  }
+  ```
+  ```
+  Verify separation in 60 seconds:
+    [ ] Is the local DATABASE_URL host different from production's?
+    [ ] Do local Stripe keys start with sk_test_ (not sk_live_)?
+    [ ] Does the host store prod secrets in a Production-only scope?
+    [ ] Do destructive scripts have the APP_ENV guard above?
+    [ ] Can you drop your local DB right now with zero customer impact?
+        If the answer is anything but an instant "yes" — you are not separated.
+  ```
+
+### 9.3 Keep test data out of production tables
+- **Rule:** No `asdf`, `test@test.com`, `Lorem ipsum`, or QA accounts in
+  production tables alongside paying customers. If you must test against
+  production, use a flagged, filterable, and purgeable test path — never
+  anonymous junk rows.
+- **Explanation:** This is what environment separation looks like when it
+  fails in slow motion. Test users named `asdf` sitting in the same table as
+  paying customers corrupt everything downstream: your revenue numbers, churn
+  rate, and cohort analysis are all wrong; emails go to fake addresses and
+  hurt your sending reputation; and when you eventually try to clean up, you
+  can't reliably tell a junk row from a real customer who happened to pick a
+  weird name. It also makes §6 retention impossible — you can't apply a legal
+  retention policy to data you can't classify.
+- **Applies to:** Every production database. Stacks: Postgres/MySQL (partial
+  indexes and views that exclude test rows), any analytics pipeline
+  (PostHog, Mixpanel, BigQuery — filter at ingest, not in the dashboard),
+  Stripe (test-mode customers stay in test mode automatically — use it).
+- **Example:**
+  ```sql
+  -- If a test path in production is unavoidable, make it explicit and purgeable
+  ALTER TABLE users ADD COLUMN is_test BOOLEAN NOT NULL DEFAULT false;
+  CREATE INDEX users_real_idx ON users (created_at) WHERE is_test = false;
+
+  -- Every analytics/reporting query reads the view, never the raw table
+  CREATE VIEW real_users AS SELECT * FROM users WHERE is_test = false;
+
+  -- Purge test data on a schedule so it can never accumulate
+  DELETE FROM users WHERE is_test = true AND created_at < NOW() - INTERVAL '7 days';
+  ```
+  ```
+  Cleanup order if you already have junk in production:
+    1. STOP the source — point dev/QA at a separate database first (§9.2).
+       Cleaning while the leak is open is wasted work.
+    2. Identify, don't guess: obvious test emails (@example.com, +test@,
+       @yourcompany.com QA accounts), never-logged-in accounts with no
+       payment record, names matching ^(asdf|test|aaa|qwerty)$
+    3. Flag them (is_test = true) — do NOT delete on the first pass. A
+       false positive here deletes a real customer.
+    4. Have a human review the flagged list. Then purge.
+    5. Re-run revenue/churn numbers. Expect them to move.
+  ```
+
+### 9.4 Log every sensitive action — your AI built the actions, not the receipts
+- **Rule:** Every sensitive action writes an audit record: plan upgrades and
+  downgrades, email/password changes, permission and role changes, data
+  deletion, exports, refunds, and admin impersonation. Record **who, what,
+  when, from where, and before → after**.
+- **Explanation:** Without receipts you cannot answer the two questions that
+  will definitely be asked. A customer says *"I did not authorize that
+  charge"* — with no log, you have no record, and you refund it and eat the
+  loss. A team member says *"the record just disappeared"* — with no log, you
+  can't trace who deleted it or restore intent. AI builds the action because
+  the action is the feature; the log is invisible in the demo, so it never
+  gets written. It costs one table and one function call per action.
+- **Applies to:** Any multi-user app, anything with billing, anything with
+  roles/permissions, and every B2B product (enterprise buyers will ask for
+  this directly — see §5.3). Stacks: an append-only Postgres table (revoke
+  `UPDATE`/`DELETE` from the app role), Supabase triggers, Prisma middleware,
+  Django signals, Rails `ActiveSupport::Notifications`, or an event stream
+  (Kafka, EventBridge) for higher volume.
+- **Example:**
+  ```sql
+  CREATE TABLE sensitive_action_log (
+    id           BIGSERIAL PRIMARY KEY,
+    actor_id     UUID,                    -- who did it (NULL = system)
+    actor_type   TEXT NOT NULL,           -- 'user' | 'admin' | 'system' | 'api'
+    on_behalf_of UUID,                    -- set when an admin impersonates
+    action       TEXT NOT NULL,           -- 'plan.upgraded', 'email.changed'
+    target_type  TEXT NOT NULL,           -- 'subscription' | 'user' | 'invoice'
+    target_id    TEXT NOT NULL,
+    before       JSONB,                   -- state prior to the change
+    after        JSONB,                   -- state after the change
+    ip_address   INET,
+    user_agent   TEXT,
+    occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX ON sensitive_action_log (target_type, target_id, occurred_at DESC);
+  CREATE INDEX ON sensitive_action_log (actor_id, occurred_at DESC);
+
+  -- Append-only: the log is worthless if the app can rewrite it
+  REVOKE UPDATE, DELETE ON sensitive_action_log FROM app_role;
+  GRANT  INSERT, SELECT ON sensitive_action_log TO app_role;
+  ```
+  ```typescript
+  // One helper, called from every sensitive action. No exceptions.
+  async function audit(e: {
+    actorId: string | null; actorType: 'user'|'admin'|'system'|'api';
+    action: string; targetType: string; targetId: string;
+    before?: unknown; after?: unknown; req?: Request;
+  }) {
+    await db.sensitiveActionLog.create({ data: {
+      ...e,
+      ipAddress: e.req?.headers.get('x-forwarded-for')?.split(',')[0],
+      userAgent: e.req?.headers.get('user-agent'),
+    }});
+  }
+
+  // Usage — the audit call sits next to the mutation, in the same transaction
+  await db.$transaction(async (tx) => {
+    const before = await tx.subscription.findUnique({ where: { userId } });
+    const after  = await tx.subscription.update({
+      where: { userId }, data: { plan: 'pro' },
+    });
+    await audit({ actorId: user.id, actorType: 'user', action: 'plan.upgraded',
+                  targetType: 'subscription', targetId: after.id,
+                  before, after, req });
+  });
+  ```
+  ```
+  Minimum action list to log (start here, add as you build):
+    Billing      plan.upgraded · plan.downgraded · plan.cancelled ·
+                 payment.succeeded · payment.failed · refund.issued
+    Identity     email.changed · password.changed · mfa.enabled ·
+                 mfa.disabled · login.failed (repeated) · session.revoked
+    Access       role.granted · role.revoked · invite.sent · member.removed ·
+                 api_key.created · api_key.revoked · admin.impersonated
+    Data         record.deleted · bulk.deleted · data.exported ·
+                 account.deletion_requested   (→ ties into §6.4)
+
+  The test: can you reconstruct exactly what happened to one customer's
+  account, in order, from the log alone? If not, you're missing events.
+  ```
+
+### 9.5 Add the three gaps to your definition of done
+- **Rule:** A feature is not done when it works. It's done when it has
+  designed failure states, runs against a non-production database in
+  development, and writes an audit record if it touches anything sensitive.
+  Put this in your `CLAUDE.md` so the AI applies it without being reminded.
+- **Explanation:** All three gaps come from the same place — AI optimizes for
+  the demo, and the demo only shows the happy path on one environment with no
+  receipts. Telling the AI once, in a prompt, doesn't stick across sessions.
+  Encoding it in the repo's own rules file does, because it gets read every
+  time. This is the cheapest possible fix: you're changing the default rather
+  than remembering to correct it 200 times. And the audits found these gaps
+  because *customers* found them first — that's the alternative.
+- **Applies to:** Every AI-assisted repo. Stacks: agnostic — this is a
+  `CLAUDE.md` / `.cursorrules` / PR-template change, not a code change.
+- **Example:**
+  ```markdown
+  <!-- Paste into your project's CLAUDE.md -->
+  ## Definition of done (enforced on every feature)
+
+  1. Failure states are designed, not defaulted. Every data-fetching or
+     mutating path handles: loading, empty, error, partial. Errors state
+     what happened, what to do next, and include a request/reference ID.
+     Never surface a stack trace or a bare 500 to a user.
+  2. Development never touches production. Local work uses a local or
+     branch database and test-mode API keys. Destructive scripts abort
+     when APP_ENV=production.
+  3. Sensitive actions write an audit record. Billing, identity, access,
+     and deletion changes call audit() in the same transaction as the
+     mutation, capturing actor, action, target, before/after, IP, and UA.
+
+  If a requested change cannot satisfy these, say so before writing code.
+  ```
+  ```
+  And in .github/pull_request_template.md:
+
+  ## Definition of done
+  - [ ] Loading / empty / error / partial states handled
+  - [ ] No new secret, key, or connection string committed
+  - [ ] Ran against a non-production database
+  - [ ] Sensitive actions write an audit record (or: none touched)
+  ```
+
+---
+
+## 10. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
