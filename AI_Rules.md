@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–17**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–18**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–17)
+### Part II — What it builds, and the business under it (5–18)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -141,8 +141,14 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [17.3 Rate limit and watch for harvesting — assume every endpoint will be scraped](#173-rate-limit-and-watch-for-harvesting--assume-every-endpoint-will-be-scraped)
   - [17.4 Treat your API as a product — it is a first impression you don't get to redo](#174-treat-your-api-as-a-product--it-is-a-first-impression-you-dont-get-to-redo)
   - [17.5 Version from day one — v1 stays stable, v2 adds](#175-version-from-day-one--v1-stays-stable-v2-adds)
+- [18. Staging, CI & Rollback](#18-staging-ci--rollback)
+  — *stop shipping to production on a prayer*
+  - [18.1 Build a staging environment that mirrors production](#181-build-a-staging-environment-that-mirrors-production)
+  - [18.2 Nothing ships without passing the pipeline](#182-nothing-ships-without-passing-the-pipeline)
+  - [18.3 One-click rollback to the last known good deploy](#183-one-click-rollback-to-the-last-known-good-deploy)
+  - [18.4 Database migrations do not roll back — make them backwards-compatible](#184-database-migrations-do-not-roll-back--make-them-backwards-compatible)
 
-- [18. Meta](#18-meta)
+- [19. Meta](#19-meta)
 
 ---
 
@@ -156,6 +162,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Adding payments / pricing | [§13](#13-pricing-credits--usage-metering), then [§15](#15-dunning--recovering-failed-payments), then [§16](#16-chargebacks--payment-disputes) |
 | A chargeback just landed | [§16.3 evidence workflow](#163-build-the-dispute-response-workflow-before-the-first-dispute) |
 | Exposing an API / integration | [§17](#17-api-design--your-biggest-liability-or-your-best-asset) |
+| A bad deploy is live right now | [§18.3 roll back first](#183-one-click-rollback-to-the-last-known-good-deploy) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -4440,7 +4447,181 @@ built on it.
 
 ---
 
-## 18. Meta
+## 18. Staging, CI & Rollback
+
+Right now every push goes straight to production. Your AI builds on `main` and
+ships it live, so one bad merge means your customers find the bug before you
+do.
+
+Three things fix it: **a staging environment that mirrors production**,
+**a pipeline where nothing ships without passing**, and **one-click rollback**
+for what gets through anyway. Stop shipping on a prayer.
+
+> Related: §9.2 requires dev and prod to be separate. Staging is the third
+> environment — the one that looks like production but costs nothing to break.
+
+### 18.1 Build a staging environment that mirrors production
+- **Rule:** Create an environment matching production's schema, services, and
+  environment variables — with its own database and test-mode keys. Every pull
+  request gets a preview deployment. Test there, never in production.
+- **Explanation:** Bugs that only appear in production are almost always
+  environment differences: a migration that ran locally but not on the real
+  schema, a missing env var, a service that exists in one place and not the
+  other. Staging catches those *because* it mirrors production — the closer
+  the mirror, the more it catches. The trap is drift: a staging environment
+  two migrations behind production tests nothing useful and gives you false
+  confidence, which is worse than no staging at all.
+- **Applies to:** Every deployed app. Stacks: Vercel and Netlify give
+  per-PR preview deployments almost free; pair them with a branch database
+  (Neon, PlanetScale, Supabase branching) so each preview gets real schema
+  without touching production data. On AWS/GCP, a second stack from the same
+  IaC definition — if staging is hand-built, it will drift.
+- **Example:**
+  ```
+  What "mirrors production" actually requires:
+
+  [ ] Same schema — staging runs the SAME migrations, in the same order
+  [ ] Own database — never a shared or production database (§9.2)
+  [ ] Test-mode keys everywhere (sk_test_, not sk_live_)
+  [ ] Same env var NAMES as production; different VALUES
+  [ ] Same services present (queue, cache, storage) — not stubbed out
+  [ ] Realistic seed data, anonymized — never a copy of production PII
+  [ ] Same runtime version, same build command, same config
+  [ ] Publicly unreachable: password/SSO gate + noindex, so staging is
+      never crawled and never mistaken for the real product
+
+  The drift check, run weekly: diff staging's applied migrations against
+  production's. If they differ, staging is lying to you.
+  ```
+
+### 18.2 Nothing ships without passing the pipeline
+- **Rule:** Build a CI pipeline that runs on every pull request and blocks
+  merge on failure. Passing promotes to production automatically; failing
+  means production never sees it. No manual override, no "just this once."
+- **Explanation:** The value is that the gate is mechanical — it holds on the
+  Friday when everyone is tired, which is exactly when bad merges happen.
+  Automatic promotion on green matters too: if shipping requires a human to
+  remember a step, that step gets skipped under pressure, and you end up with
+  a passing pipeline and unshipped code. And an override that exists will get
+  used, which is why the rule is "no override" rather than "use it sparingly."
+- **Applies to:** Every repo with more than one deploy per week. Stacks:
+  GitHub Actions, GitLab CI, CircleCI, or your host's built-in checks, plus
+  branch protection so the check is genuinely required rather than advisory.
+- **Example:**
+  ```yaml
+  # .github/workflows/ci.yml — the gate
+  on: pull_request
+  jobs:
+    verify:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - run: npm ci
+        - run: npm run lint
+        - run: npm run typecheck
+        - run: npx gitleaks detect --source .    # §8.2 — secrets, every PR
+        - run: npm test
+        - run: npm run test:e2e                  # against the preview deploy
+        - run: npm run migrate:check             # migrations apply cleanly?
+  ```
+  ```
+  Then enforce it — a pipeline nobody has to pass is decoration:
+
+  GitHub → Settings → Branches → protect `main`:
+    [ ] Require pull request before merging
+    [ ] Require status checks to pass (select the `verify` job)
+    [ ] Require branches to be up to date before merging
+    [ ] Include administrators   ← the one people skip, and the one
+                                    that makes the rule real
+  ```
+
+### 18.3 One-click rollback to the last known good deploy
+- **Rule:** Every deployment must be reversible with one action, in under a
+  minute, without SSH-ing into anything. Know the button before you need it,
+  and test it once on purpose.
+- **Explanation:** Something will get past staging — that's not a process
+  failure, it's normal. What matters is how long customers experience it. The
+  instinct under pressure is to diagnose and hot-fix forward, which takes 20
+  minutes on a good day; rolling back takes 30 seconds and buys you the time
+  to diagnose calmly. So the rule is **roll back first, debug second**. A
+  rollback path you've never exercised is a guess, which is why it gets tested
+  deliberately rather than discovered during an incident.
+- **Applies to:** Every production deployment. Stacks: Vercel and Netlify keep
+  every build and offer instant promote-a-previous-deployment; Kubernetes has
+  `kubectl rollout undo`; ECS/Cloud Run redeploy a prior revision; anything
+  container-based rolls back by pointing at the previous image tag. Pair with
+  §14.5 alerts so you learn you need it within minutes, not from a customer.
+- **Example:**
+  ```bash
+  # Know YOUR command before the incident. Write it in the runbook (§8.5).
+  vercel rollback <deployment-url>          # Vercel
+  kubectl rollout undo deployment/api       # Kubernetes
+  gcloud run services update-traffic api --to-revisions=PREV=100   # Cloud Run
+
+  # Prerequisites that make rollback actually work:
+  #   · Deploys are immutable and tagged by commit SHA
+  #   · The last 10+ builds are retained, not just the current one
+  #   · No deploy step mutates shared state irreversibly (§18.4)
+  #   · Feature flags for risky changes — flip off without redeploying
+  ```
+  ```
+  The incident order, in priority sequence:
+
+    1. ROLL BACK        restore service first, always
+    2. Confirm recovery error rate back to baseline (§14.2)
+    3. Then diagnose    on the failed build, not on production
+    4. Fix + re-ship    through the normal pipeline (§18.2)
+    5. Post-mortem      what should CI have caught? Add that test.
+
+  Practise it: roll back a trivial deploy on purpose, once, and time it.
+  If it takes more than a minute or needs a person who is on holiday,
+  you don't have rollback — you have a plan to build one.
+  ```
+
+### 18.4 Database migrations do not roll back — make them backwards-compatible
+- **Rule:** Never ship a migration that a code rollback cannot survive. Deploy
+  schema changes in expand → migrate → contract phases, and treat a dropped
+  column or renamed table as irreversible.
+- **Explanation:** This is what quietly breaks the one-click-rollback promise.
+  Reverting code takes 30 seconds; it does *not* restore a column you dropped
+  in the same release. If v2 renamed `name` to `full_name` and you roll back to
+  v1, v1 queries a column that no longer exists and the outage gets worse, not
+  better. The fix is decoupling: ship the schema change and the code change as
+  separate deploys, so at every moment the database is compatible with both
+  the current code and the previous code. It's one extra deploy and it's what
+  makes rollback trustworthy.
+- **Applies to:** Any app with a database. Stacks: Prisma Migrate, Django
+  migrations, Rails, Alembic, Flyway — all of them will happily generate the
+  destructive one-shot version, so the discipline is yours, not the tool's.
+- **Example:**
+  ```
+  Renaming users.name → users.full_name, safely (3 deploys, not 1):
+
+  DEPLOY 1 — EXPAND (additive only, rollback-safe)
+    · ADD COLUMN full_name; backfill from name
+    · Code writes BOTH columns, reads `name`
+    → rolling back is fine: old code still uses `name`
+
+  DEPLOY 2 — MIGRATE (switch the reader)
+    · Code reads `full_name`, still writes both
+    → rolling back is fine: both columns are populated
+
+  DEPLOY 3 — CONTRACT (destructive, only after soak)
+    · Code writes only `full_name`
+    · DROP COLUMN name  ← now unreversible. Wait days, not minutes.
+    → rollback past this point is no longer possible. That's the cost
+      of the last step, which is why it goes last and alone.
+
+  Rules that follow from this:
+    ✗ Never combine a destructive migration with a feature release
+    ✗ Never DROP in the same deploy that stops using the column
+    ✓ Take a verified backup before any contract step (§10.2)
+    ✓ Migrations run as their own pipeline stage, before the app deploy
+  ```
+
+---
+
+## 19. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
