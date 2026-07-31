@@ -1127,6 +1127,10 @@ it never will unless you explicitly tell it to.
 > §9.4 below is the broader rule — receipts on every sensitive action.
 
 ### 9.1 Build the unhappy path — your users live there more than you think
+> **§12 is the implementation depth for this rule** — try/catch placement,
+> the four-state contract, retry/backoff, and idempotency. This rule is the
+> *what*; §12 is the *how*.
+
 - **Rule:** Every feature ships with its failure states designed, not
   defaulted. No white screens, no raw stack traces, no bare `500`. Every
   error the user can hit must say what happened, what it means, and what to
@@ -1990,7 +1994,383 @@ session*.
 
 ---
 
-## 12. Meta
+## 12. The Happy Path Trap — Error Handling Implementation
+
+The implementation depth for §9.1. The trap: your app handles success
+perfectly — card goes through, data saves, confetti pops — and handles
+failure with a blank screen and silence. The card declines, nothing appears,
+the customer leaves. You never even find out.
+
+Three steps close it: **wrap every external call**, **build all four states
+on every component**, **retry with exponential backoff, then fail
+gracefully**. Two more rules below cover the parts that bite you when you
+implement the first three naively — retrying things that must never be
+retried, and freezing the UI while you do it.
+
+> §9.1 is the rule ("build the unhappy path"). This section is the code.
+
+### 12.1 Wrap every external call — payments, APIs, databases, all of them
+- **Rule:** Every call that leaves your process gets a `try/catch` (or
+  equivalent), a timeout, and a defined failure behavior. No exceptions for
+  "this one always works." If the card declines, tell the user exactly what
+  happened and give them a retry button.
+- **Explanation:** Anything crossing the network can fail, and the ones you
+  assume are reliable are the ones that take the app down silently. An
+  unwrapped `await` that rejects becomes an unhandled rejection — which in a
+  React tree means a blank screen, and in a Node handler means a hung request
+  or a bare 500. The honesty part matters commercially: "Your bank declined
+  this card — try another card or contact your bank" recovers a sale, while
+  a frozen button loses it *and* generates a support ticket you can't
+  diagnose. Being specific always beats being vague.
+- **Applies to:** Payments (Stripe, PayPal), any third-party API, your own
+  database, file/blob storage, email/SMS providers, LLM APIs, webhooks you
+  call outward. Stacks: `try/catch` + `AbortSignal.timeout()` in TS/JS,
+  `try/except` with `timeout=` in Python (`httpx`/`requests`), `context.
+  WithTimeout` in Go, `rescue` in Ruby. Framework-level nets (Next.js
+  `error.tsx`, Express error middleware) are the *backstop*, not the plan.
+- **Example:**
+  ```typescript
+  // WRONG — AI's default. Rejects → unhandled → blank screen.
+  async function checkout(cart: Cart) {
+    const intent = await stripe.paymentIntents.create({ amount: cart.total });
+    await db.orders.create({ data: { intentId: intent.id } });
+    return intent;
+  }
+
+  // RIGHT — wrapped, timed out, classified, actionable
+  async function checkout(cart: Cart): Promise<CheckoutResult> {
+    try {
+      const intent = await stripe.paymentIntents.create(
+        { amount: cart.total, currency: 'usd' },
+        { idempotencyKey: cart.id, timeout: 10_000 },   // see §12.4
+      );
+      await db.orders.create({ data: { intentId: intent.id } });
+      return { ok: true, intent };
+
+    } catch (err) {
+      logger.error({ err, cartId: cart.id, userId: cart.userId });
+
+      // Classify: what can the USER do about it?
+      if (err instanceof Stripe.errors.StripeCardError) {
+        return { ok: false, kind: 'card_declined', retryable: false,
+          message: declineMessage(err.decline_code),
+          action: 'Try a different payment method.' };
+      }
+      if (err instanceof Stripe.errors.StripeConnectionError) {
+        return { ok: false, kind: 'network', retryable: true,
+          message: "We couldn't reach our payment provider.",
+          action: 'Please try again in a moment.' };
+      }
+      if (err instanceof Stripe.errors.StripeRateLimitError) {
+        return { ok: false, kind: 'rate_limit', retryable: true,
+          message: 'Things are busy right now.',
+          action: 'Retrying automatically…' };
+      }
+      return { ok: false, kind: 'unknown', retryable: false,
+        message: 'Something broke on our end. We have been notified.',
+        action: 'Contact support with reference ' + requestId };
+    }
+  }
+
+  // Be specific — the decline reason is the difference between a
+  // recovered sale and a lost one.
+  function declineMessage(code?: string) {
+    return {
+      insufficient_funds: 'Your card was declined for insufficient funds.',
+      expired_card:       'That card has expired.',
+      incorrect_cvc:      "The security code didn't match.",
+      lost_card:          'Your bank declined this card. Please contact them.',
+      generic_decline:    'Your bank declined this card.',
+    }[code ?? ''] ?? 'Your bank declined this card.';
+  }
+  ```
+  ```
+  Rule of thumb for every catch block, answer these three:
+    1. What do I LOG?     (full error, IDs, context — for you)
+    2. What do I SHOW?    (plain language, no stack trace — for them)
+    3. What CAN THEY DO?  (retry, change card, contact support, wait)
+  If you can't answer #3, the error message isn't finished.
+  ```
+
+### 12.2 Every component implements all four states — no exceptions
+- **Rule:** Loading, error, empty, success. Every component that fetches or
+  mutates data implements all four. A component that only renders success is
+  not finished, and "it'll basically never be empty" is not a reason to skip
+  one.
+- **Explanation:** The four states are a *contract*, not a style preference —
+  the moment one component skips one, that's where the blank screen appears.
+  Making it mechanical is the point: you don't have to reason about which
+  components deserve error states, you just fill in four branches every time,
+  which means it survives a rushed Friday. AI will happily generate all four
+  when asked and will never generate them unasked, so the fix is putting the
+  requirement in `CLAUDE.md` (§9.5) rather than remembering to prompt for it.
+- **Applies to:** React/Next.js, Vue, Svelte, Angular, SwiftUI, Flutter,
+  React Native — any component-based UI. Stacks: TanStack Query, SWR, RTK
+  Query, Apollo all hand you `isLoading`/`error`/`data` directly, so the four
+  branches are nearly free. Pair with an error boundary
+  (`error.tsx` / `ErrorBoundary`) as the backstop for render-time crashes.
+- **Example:**
+  ```tsx
+  // The four-state contract, made reusable so nobody can "forget" one.
+  type AsyncViewProps<T> = {
+    query: { data?: T; error?: unknown; isLoading: boolean; refetch(): void };
+    empty: () => ReactNode;
+    children: (data: T) => ReactNode;
+    skeleton?: ReactNode;
+  };
+
+  function AsyncView<T>({ query, empty, children, skeleton }: AsyncViewProps<T>) {
+    if (query.isLoading) return <>{skeleton ?? <Skeleton />}</>;   // 1 LOADING
+    if (query.error)     return <ErrorState                        // 2 ERROR
+        message={toUserMessage(query.error)}
+        onRetry={query.refetch}
+        reference={requestIdOf(query.error)} />;
+    if (isEmpty(query.data)) return <>{empty()}</>;                // 3 EMPTY
+    return <>{children(query.data as T)}</>;                       // 4 SUCCESS
+  }
+
+  // Usage — impossible to ship a component missing a state
+  <AsyncView
+    query={useQuery(['orders'], fetchOrders)}
+    skeleton={<OrdersSkeleton rows={5} />}
+    empty={() => <EmptyState
+      title="No orders yet"
+      detail="Your orders will appear here after your first purchase."
+      action={{ label: 'Browse products', href: '/shop' }} />}
+  >
+    {(orders) => <OrderTable orders={orders} />}
+  </AsyncView>
+  ```
+  ```
+  What each state must actually contain (not just "exist"):
+
+  LOADING  Skeleton matching the real layout — no spinner-on-blank, no
+           layout shift when data arrives. Show it after ~200ms so fast
+           responses don't flash.
+  ERROR    What happened, in the user's words · what to do next ·
+           a Retry button · a reference ID for support. Never a stack
+           trace, never "Error: undefined".
+  EMPTY    Why it's empty and how to get the first item. "No data" is a
+           dead end; "No invoices yet — they appear after your first
+           payment" is a next step.
+  SUCCESS  The actual content. Plus: partial-failure handling if some of
+           the data loaded and some didn't (don't fail the whole page
+           because one widget's API is down).
+
+  Mutations get a fifth: SUBMITTING — disable the button, show progress,
+  and make double-submit impossible (§12.4).
+  ```
+
+### 12.3 Retry with exponential backoff — 1s, 2s, 4s — then fail gracefully
+- **Rule:** Transient failures get a bounded retry with exponentially
+  increasing delays (1s, 2s, 4s) plus jitter. Cap the attempts, then stop and
+  show a clear message. Never retry in a tight loop, never retry forever.
+- **Explanation:** Most network failures are transient and resolve within
+  seconds, so a silent retry converts a visible error into a non-event.
+  Exponential spacing matters because immediate retries hammer a service
+  that's already struggling — you turn a blip into an outage, and if every
+  client retries on the same schedule they synchronize into a thundering
+  herd, which is what **jitter** (a small random offset) prevents. The
+  "then fail gracefully" half is not optional: after the last attempt the
+  user gets a real message, not an infinite spinner. Infinite retry is the
+  same as a freeze from the user's side.
+- **Applies to:** Idempotent reads, network-level failures, `429` rate
+  limits, `5xx` responses. Stacks: TanStack Query (`retry`, `retryDelay`),
+  axios-retry, `p-retry`, `tenacity` (Python), Polly (.NET), `resilience4j`
+  (Java), plus infrastructure-level retry in SQS/EventBridge/Cloud Tasks for
+  background jobs. Serverless note: retries burn execution time — cap total
+  elapsed time, not just attempts.
+- **Example:**
+  ```typescript
+  async function withRetry<T>(
+    fn: () => Promise<T>,
+    { attempts = 4, baseMs = 1000, maxMs = 30_000, signal }: RetryOpts = {},
+  ): Promise<T> {
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (!isRetryable(err) || i === attempts - 1) break;  // stop early
+
+        // 1s → 2s → 4s, capped, ± jitter so clients don't synchronize
+        const backoff = Math.min(baseMs * 2 ** i, maxMs);
+        const jitter  = backoff * (Math.random() * 0.3);      // ±30%
+        await sleep(backoff + jitter, signal);
+      }
+    }
+    throw lastErr;   // caller shows the graceful failure — see §12.1
+  }
+
+  // WHAT to retry is as important as how. Retrying a 400 just wastes time.
+  function isRetryable(err: unknown): boolean {
+    if (err instanceof TypeError) return true;             // network/DNS
+    const status = (err as any)?.status ?? (err as any)?.response?.status;
+    if (status === 429) return true;                       // rate limited
+    if (status >= 500 && status <= 599) return true;       // server-side
+    return false;   // 400/401/403/404/409/422 → your request is the problem
+  }
+  ```
+  ```
+  Retry decision table — memorize this, it prevents most retry bugs:
+
+  Condition                        Retry?  Why
+  ───────────────────────────────  ──────  ─────────────────────────────
+  Network error / DNS / timeout    YES     Almost always transient
+  429 Too Many Requests            YES     Honor Retry-After if present
+  500 / 502 / 503 / 504            YES     Server-side, usually transient
+  400 Bad Request                  NO      Your payload is wrong
+  401 Unauthorized                 NO*     Refresh token once, then stop
+  403 Forbidden                    NO      Permissions won't change on retry
+  404 Not Found                    NO      It won't appear on attempt three
+  409 Conflict                     NO      Resolve the conflict first
+  422 Validation failed            NO      Fix the input
+  Card declined (402)              NO      §12.4 — needs a USER action
+
+  And always: honor `Retry-After` when the server sends it. Your backoff
+  guess is worse than the server's instruction.
+  ```
+
+### 12.4 Only retry what is safe to retry — idempotency before backoff
+- **Rule:** Before adding retry logic to any operation that *writes*, make it
+  idempotent. Use an idempotency key for payments and order creation. Never
+  blind-retry a charge, an email send, or an order — and never auto-retry a
+  card decline.
+- **Explanation:** This is the rule that turns §12.3 from a fix into a bug,
+  and it's the one most retry implementations miss. A charge that times out
+  may well have *succeeded* on the server — the response just didn't reach
+  you. Retrying it charges the customer twice, and now you have a refund, a
+  chargeback, and a trust problem that costs far more than the original
+  error. Card declines are the sharper version: a decline is not a transient
+  failure, it's a decision by the customer's bank. Auto-retrying it does
+  nothing, and repeated retries can get your Stripe account flagged for
+  card-testing. Declines need a *user action*, not a machine retry.
+- **Applies to:** Payments (Stripe/PayPal/Adyen), order and invoice creation,
+  outbound email/SMS, webhook delivery, any `POST`/`PATCH`/`DELETE` you
+  retry, and background jobs (a queue that redelivers on failure is retrying
+  whether you designed for it or not). Stacks: Stripe `idempotencyKey`,
+  Postgres `INSERT … ON CONFLICT DO NOTHING` with a natural key, unique
+  constraints on `(user_id, external_ref)`, SQS `MessageDeduplicationId`.
+- **Example:**
+  ```typescript
+  // WRONG — retry wrapped around a non-idempotent write. Double charges.
+  await withRetry(() =>
+    stripe.paymentIntents.create({ amount, currency: 'usd' }));
+  //  Timeout on attempt 1 (charge succeeded) → attempt 2 charges again.
+
+  // RIGHT — the key makes the retry a no-op if the first one landed
+  await withRetry(() =>
+    stripe.paymentIntents.create(
+      { amount, currency: 'usd' },
+      { idempotencyKey: `order-${order.id}` },   // stable, NOT random
+    ));
+  // Stripe returns the ORIGINAL result for a repeated key. Retry is safe.
+  ```
+  ```typescript
+  // Same idea for your own writes — a unique key, not a "check then insert"
+  // (check-then-insert races under concurrency; the constraint does not)
+  await db.orders.upsert({
+    where:  { idempotencyKey: `checkout-${cart.id}` },
+    create: { idempotencyKey: `checkout-${cart.id}`, ...orderData },
+    update: {},                          // already exists → do nothing
+  });
+  ```
+  ```
+  The decline path — a USER action, never an automatic retry:
+
+    Card declined
+      → do NOT call withRetry()
+      → show the specific reason (§12.1 declineMessage)
+      → offer: [Use a different card]  [Update card details]  [Contact bank]
+      → log it as a business event, not an error (§9.4) — decline rate is
+        a metric you want to watch, not noise in your error tracker
+
+  Before wrapping ANY write in retry, ask:
+    "If this runs twice, does the customer notice?"
+    If yes → make it idempotent first. Retry second. Never the reverse.
+  ```
+
+### 12.5 Never freeze the UI — the user always knows what's happening
+- **Rule:** No operation leaves the interface unresponsive or unexplained.
+  Every action gives immediate feedback, every wait is visible, every retry
+  is announced, and every failure ends in a state the user can act from.
+  Silence is the worst possible response.
+- **Explanation:** From the user's side, a frozen UI and a crashed app are
+  identical — and both end with them leaving. This is why the retry loop in
+  §12.3 must be *visible*: three silent retries with backoff is seven seconds
+  of a dead-looking button, and the user will click it four more times or
+  close the tab. Telling them "Retrying (2 of 3)…" costs one line and
+  completely changes the experience, because a wait you understand is
+  tolerable while a wait you don't is broken. This also covers the timeout
+  case: a request with no timeout can hang indefinitely, which is a freeze
+  you never even see in your error tracker.
+- **Applies to:** Every interactive surface — web, mobile, desktop, CLI, and
+  chat interfaces. Stacks: optimistic updates (TanStack Query `onMutate`),
+  `useTransition`/`useOptimistic` in React, toast systems (Sonner,
+  react-hot-toast), `AbortSignal.timeout()` on every fetch, plus
+  `aria-live` regions so screen readers announce state changes too.
+- **Example:**
+  ```tsx
+  // Every async action follows this shape
+  function PayButton({ cart }: { cart: Cart }) {
+    const [state, setState] = useState<
+      { k: 'idle' } | { k: 'submitting' } | { k: 'retrying'; n: number }
+      | { k: 'error'; msg: string; action: string } | { k: 'done' }>({ k: 'idle' });
+
+    async function onPay() {
+      setState({ k: 'submitting' });
+      try {
+        const res = await withRetry(() => checkout(cart), {
+          onRetry: (n) => setState({ k: 'retrying', n }),   // ← VISIBLE
+          signal: AbortSignal.timeout(30_000),              // ← never hangs
+        });
+        if (!res.ok) return setState({ k: 'error', msg: res.message, action: res.action });
+        setState({ k: 'done' });
+      } catch {
+        setState({ k: 'error',
+          msg: "We couldn't complete your payment.",
+          action: 'Your card was not charged. Please try again.' });
+        //         ↑ tell them the money is safe. This is the single most
+        //           reassuring sentence in a failed checkout.
+      }
+    }
+
+    return (
+      <div aria-live="polite">
+        <button onClick={onPay} disabled={state.k === 'submitting' || state.k === 'retrying'}>
+          {state.k === 'submitting' ? 'Processing…'
+           : state.k === 'retrying' ? `Retrying (${state.n} of 3)…`
+           : state.k === 'done'     ? 'Paid ✓'
+           : 'Pay now'}
+        </button>
+        {state.k === 'error' && (
+          <ErrorState message={state.msg} detail={state.action}
+                      onRetry={onPay} />   // ← always a way forward
+        )}
+      </div>
+    );
+  }
+  ```
+  ```
+  The freeze checklist — audit any slow action against this:
+
+  [ ] Feedback within 100ms of the click (button state changes instantly)
+  [ ] Button disabled while in flight — double-submit is impossible
+  [ ] Waits over ~1s show progress, not a static frozen control
+  [ ] Retries are announced ("Retrying 2 of 3"), never silent
+  [ ] EVERY fetch has a timeout — no request can hang forever
+  [ ] Long operations are cancellable (AbortController + a Cancel button)
+  [ ] Failure ends in an actionable state, never a dead end
+  [ ] For payments specifically: say whether they were charged
+  [ ] aria-live announces state changes for screen readers
+  [ ] Test it on a throttled connection (DevTools → Network → Slow 3G).
+      Most freezes are invisible on localhost — that's why they ship.
+  ```
+
+---
+
+## 13. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
