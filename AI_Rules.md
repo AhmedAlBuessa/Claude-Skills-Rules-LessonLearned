@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–19**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–21**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–19)
+### Part II — What it builds, and the business under it (5–21)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -153,8 +153,20 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [19.2 Test on mobile — you build on desktop, your users aren't there](#192-test-on-mobile--you-build-on-desktop-your-users-arent-there)
   - [19.3 Do the math — testing is a financial decision](#193-do-the-math--testing-is-a-financial-decision)
   - [19.4 You can't test every combination — detect the gaps in production](#194-you-cant-test-every-combination--detect-the-gaps-in-production)
+- [20. Test Discipline](#20-test-discipline)
+  — *the quality gate is yours, not the AI's*
+  - [20.1 Write tests in the same conversation as the feature](#201-write-tests-in-the-same-conversation-as-the-feature)
+  - [20.2 Set a coverage floor and enforce it on every commit](#202-set-a-coverage-floor-and-enforce-it-on-every-commit)
+  - [20.3 Split unit from integration — fast on push, full on merge](#203-split-unit-from-integration--fast-on-push-full-on-merge)
+  - [20.4 Coverage measures execution, not correctness](#204-coverage-measures-execution-not-correctness)
+- [21. Where the AI Support Agent Stops and You Start](#21-where-the-ai-support-agent-stops-and-you-start)
+  — *the 70% is automatable; the 30% is where trust is won or lost*
+  - [21.1 Build the playbooks so the routine 70% never reaches a human](#211-build-the-playbooks-so-the-routine-70-never-reaches-a-human)
+  - [21.2 When the customer's evidence contradicts your system, escalate — never close](#212-when-the-customers-evidence-contradicts-your-system-escalate--never-close)
+  - [21.3 Escalate on intent and history, not just the literal message](#213-escalate-on-intent-and-history-not-just-the-literal-message)
+  - [21.4 Measure the handoff — the reopen rate tells you what the agent got wrong](#214-measure-the-handoff--the-reopen-rate-tells-you-what-the-agent-got-wrong)
 
-- [20. Meta](#20-meta)
+- [22. Meta](#22-meta)
 
 ---
 
@@ -170,6 +182,8 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Exposing an API / integration | [§17](#17-api-design--your-biggest-liability-or-your-best-asset) |
 | A bad deploy is live right now | [§18.3 roll back first](#183-one-click-rollback-to-the-last-known-good-deploy) |
 | Deciding what to test | [§19.3 the CAC math](#193-do-the-math--testing-is-a-financial-decision) |
+| Setting up a test suite | [§20](#20-test-discipline) |
+| Deploying an AI support agent | [§21](#21-where-the-ai-support-agent-stops-and-you-start) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -4817,7 +4831,357 @@ path somebody asked about.
 
 ---
 
-## 20. Meta
+## 20. Test Discipline
+
+Your AI generated a complete feature in 22 minutes — login flow, dashboard,
+payment processing, all functional, all gorgeous. None of it tested.
+
+It doesn't know the code is untested, because you never asked. **The quality
+gate is yours, not the AI's.**
+
+> Related: §19 decides *which paths* are worth testing. This section is the
+> mechanics — when tests get written, what blocks a commit, and how the suite
+> is split so it stays fast.
+
+### 20.1 Write tests in the same conversation as the feature
+- **Rule:** Ask for tests as part of building the feature, not as a follow-up
+  task. Same prompt, same session: build the login flow *and* the tests that
+  verify login, logout, wrong password, and account lockout.
+- **Explanation:** If you don't ask for tests, you don't get tests — the model
+  has no sense that they're missing. Asking in the same conversation matters
+  because the context is still loaded: the AI knows the edge cases it just
+  handled, the error shapes it chose, and the assumptions it made. Come back
+  an hour later and you get generic tests written against the code's surface
+  rather than its intent. It's also the only version that actually happens;
+  "we'll add tests after" is a promise the next feature request overwrites.
+- **Applies to:** Every AI-assisted feature. Stacks: Vitest/Jest (JS/TS),
+  pytest (Python), RSpec (Ruby), Go's `testing` — plus Playwright for flows.
+  Put the expectation in `CLAUDE.md` (§9.5) so you stop re-typing it.
+- **Example:**
+  ```
+  WRONG prompt:  "Build a login flow with email and password."
+                 → working code, zero tests, and you won't come back
+
+  RIGHT prompt:  "Build a login flow with email and password. In the same
+                  change, write tests covering: successful login, wrong
+                  password, unknown email, locked account after 5 failed
+                  attempts, expired session, and logout clearing the
+                  session. Tests must fail if I delete the lockout logic."
+
+  That last sentence is the useful one — it forces tests that assert
+  behavior rather than tests that merely execute the code (§20.4).
+
+  Add to CLAUDE.md so it applies by default:
+    "Every feature ships with tests in the same change. Cover the happy
+     path, each failure path the code handles, and each boundary
+     condition. If a requested change cannot be tested, say so before
+     writing code."
+  ```
+
+### 20.2 Set a coverage floor and enforce it on every commit
+- **Rule:** Run the suite on every commit and fail the build when coverage
+  drops below your floor — 60% is a reasonable starting line. Ratchet it
+  upward over time and never let it fall.
+- **Explanation:** The floor's job is to stop silent erosion: without it,
+  coverage decays one "small change" at a time until the suite tests nothing
+  meaningful. 60% is not a quality claim — it's the level at which you're
+  catching the failures that matter before customers do, and it's low enough
+  that nobody games it out of desperation. The **ratchet** is more important
+  than the number: whatever today's coverage is, the build fails if a change
+  reduces it, so the direction is one-way without anyone policing it.
+- **Applies to:** Every repo with a test suite. Stacks: `vitest --coverage`
+  / `jest --coverage` with `coverageThreshold`, `pytest-cov` with
+  `--cov-fail-under`, `go test -cover`. Wire it into the §18.2 CI gate so
+  the check is required, not advisory.
+- **Example:**
+  ```json
+  // vitest.config.ts / jest.config.js — the floor, enforced by the runner
+  "coverageThreshold": {
+    "global":  { "lines": 60, "functions": 60, "branches": 50 },
+    // Higher floors where mistakes are expensive — set these per §19.3
+    "./src/billing/**":  { "lines": 90, "branches": 85 },
+    "./src/auth/**":     { "lines": 90, "branches": 85 }
+  }
+  ```
+  ```
+  Two rules that make the floor real:
+
+  1. RATCHET, don't just floor. Raise the threshold whenever coverage
+     rises comfortably above it. Going backwards should require an
+     explicit, reviewed change to the config — never a silent drift.
+
+  2. Weight it by risk, not by uniformity. 60% global is fine; billing,
+     auth, and permissions should be near 90%. A uniform number pushes
+     effort toward whatever is easiest to cover, which is usually the
+     code that matters least.
+  ```
+
+### 20.3 Split unit from integration — fast on push, full on merge
+- **Rule:** Keep unit tests (individual functions, seconds to run) separate
+  from integration and end-to-end tests (full user paths, minutes). Unit tests
+  run on every push; the full suite runs on merge to `main`.
+- **Explanation:** Running everything on every push is slow enough that people
+  start skipping it or working around it, and running nothing is reckless — so
+  the split gets you both. Fast feedback while you're still in the change,
+  thorough verification before anything reaches production (§18.2). The
+  distinction is also about what each catches: unit tests find broken logic,
+  integration tests find broken *wiring* — the confirmation email that never
+  fires (§19.1) is invisible to unit tests and obvious to an integration test.
+- **Applies to:** Any suite that has grown past ~30 seconds. Stacks: separate
+  npm scripts and CI jobs, `pytest -m "not integration"`, Go build tags. Keep
+  the split visible in the directory layout so nobody has to guess.
+- **Example:**
+  ```json
+  // package.json — the split, by name and by speed
+  "scripts": {
+    "test":       "vitest run tests/unit",           // < 10s, every push
+    "test:int":   "vitest run tests/integration",    // ~1-3min, on merge
+    "test:e2e":   "playwright test",                 // ~5min, on merge
+    "test:all":   "npm run test && npm run test:int && npm run test:e2e"
+  }
+  ```
+  ```yaml
+  # CI: cheap check on every push, full gate before production
+  on: [push, pull_request]
+  jobs:
+    fast:                       # every push — keep under ~2 minutes total
+      steps: [lint, typecheck, "npm test", "npm run coverage:check"]
+    full:                       # PRs into main only
+      if: github.event_name == 'pull_request'
+      steps: ["npm run test:int", "npm run test:e2e"]
+  ```
+  ```
+  Which test to write for what:
+
+    UNIT         a pure function, a calculation, a validator, a reducer
+                 → no network, no database, no clock. Milliseconds.
+    INTEGRATION  a route + database + queue together; does the write
+                 actually land, does the email actually get queued
+    E2E          the full user path in a browser, on desktop AND mobile
+                 (§19.2) — checkout, signup, upload
+
+    Rule of thumb: if a bug would have shipped despite the unit tests
+    passing, the missing test is an integration test.
+  ```
+
+### 20.4 Coverage measures execution, not correctness
+- **Rule:** Treat the coverage number as a floor to protect, never as a goal
+  to maximize. A test that runs code without asserting its behavior is worse
+  than no test — it reports safety you don't have.
+- **Explanation:** Coverage counts lines executed, not outcomes verified, so
+  it's trivially gameable: call every function, assert nothing, hit 90%. AI is
+  particularly good at producing this kind of test because "make coverage go
+  up" is an easy target to satisfy literally. The check that keeps you honest
+  is mutation-style thinking — if you break the logic on purpose, does a test
+  fail? If deleting your account-lockout rule leaves the suite green, that
+  code was executed, not tested.
+- **Applies to:** Every suite, especially AI-generated ones. Stacks:
+  Stryker (JS/TS), `mutmut` or `cosmic-ray` (Python), PIT (Java) if you want
+  this measured rather than spot-checked — but the manual version costs
+  nothing and catches most of it.
+- **Example:**
+  ```typescript
+  // Covered but worthless — executes the code, verifies nothing
+  it('logs in', async () => {
+    await login('user@example.com', 'password');   // no assertion at all
+  });
+
+  // Actually a test — fails if the behavior changes
+  it('locks the account after 5 failed attempts', async () => {
+    for (let i = 0; i < 5; i++) {
+      await expect(login('user@example.com', 'wrong')).rejects.toThrow();
+    }
+    // even the CORRECT password must now fail
+    await expect(login('user@example.com', 'correct'))
+      .rejects.toThrow(AccountLockedError);
+  });
+  ```
+  ```
+  The five-minute audit of any AI-written test file:
+
+  [ ] Does every test have at least one meaningful assertion?
+  [ ] Does it assert the OUTPUT, not just that nothing threw?
+  [ ] Are error paths asserted with the specific error, not a bare catch?
+  [ ] Delete one line of business logic — does a test go red?
+      If not, that logic is uncovered regardless of the percentage.
+  [ ] Are the tests independent? (Passing only in order = not tests)
+  [ ] Do they avoid asserting implementation detail — so a refactor
+      that preserves behavior doesn't turn the suite red?
+  ```
+
+---
+
+## 21. Where the AI Support Agent Stops and You Start
+
+Your AI support agent handles ~70% of tickets from the playbooks you built:
+known issues, documented fixes, password resets, permission syncs, config
+errors. The customer often never files a ticket at all. That's the 70%
+working as designed.
+
+The other **30% decides whether customers stay or leave** — and it isn't
+technically harder. It needs judgment, empathy, and context the agent doesn't
+have. Build the 70% precisely so the time exists for the 30%.
+
+### 21.1 Build the playbooks so the routine 70% never reaches a human
+- **Rule:** Document every known issue and its fix as a playbook the agent can
+  follow exactly. The goal isn't deflection for its own sake — it's freeing
+  human attention for the tickets where trust is won or lost.
+- **Explanation:** Automating the routine cases is what makes the hard cases
+  survivable: if a human is answering password resets all morning, the angry
+  email from a three-time-burned customer gets a rushed reply. Playbooks work
+  because the resolution is already known and doesn't require reading intent
+  — that's exactly the property that makes a case safe to automate, and its
+  absence is what defines the 30%.
+- **Applies to:** Any product with support volume. Stacks: your help centre as
+  the source of truth, an agent grounded in it (RAG over your docs), plus a
+  ticketing system that records which playbook resolved what.
+- **Example:**
+  ```
+  Safe to automate (the resolution is known and deterministic):
+    · Password reset, MFA re-enrolment, email change
+    · "How do I…" answered verbatim by existing docs
+    · Permission/seat sync, cache clears, known config errors
+    · Status of a known incident
+    · Invoice copies, receipt resends (§16.4)
+
+  NEVER automate to resolution (needs a human decision):
+    · Anything involving a refund, credit, or billing correction
+    · Anything where the customer disputes what your system says (§21.2)
+    · Anything mentioning cancelling, legal, press, or a competitor
+    · Anything from an enterprise or high-value account
+    · Anything where the customer is clearly upset (§21.3)
+
+  Every playbook needs an explicit exit: what the agent does when the
+  script doesn't fit. "Escalate with the full transcript" is the answer —
+  never "improvise."
+  ```
+
+### 21.2 When the customer's evidence contradicts your system, escalate — never close
+- **Rule:** If a customer presents evidence your system doesn't show, the
+  agent must escalate with both versions attached. It must never resolve the
+  ticket on the basis that its own data looks fine.
+- **Explanation:** The customer has a screenshot of two charges; your system
+  shows one. The agent sees no error and closes the ticket as resolved — and
+  now you've told a correct customer they're wrong. That's the response that
+  turns a fixable billing mistake into a dispute (§16) and a lost account. A
+  duplicate authorization, a failed-then-succeeded retry (§12.4), or a
+  provider-side pending charge are all real conditions your own tables may not
+  show. The agent's data is one source, not the truth, and disagreement is a
+  signal to bring in a human — not a contradiction to resolve.
+- **Applies to:** Every automated support path touching billing, usage,
+  entitlements, or data loss. Stacks: give the agent read access to the
+  payment provider's dashboard data as a *second* source, and make
+  "sources disagree" a hard escalation trigger in its instructions.
+- **Example:**
+  ```
+  WRONG (what closes the account):
+    Customer: "I was charged twice — here's the screenshot."
+    Agent:    "I've reviewed your account and see only one charge.
+               Everything looks correct! Closing this ticket."
+    → customer is right, feels dismissed, files a chargeback
+
+  RIGHT:
+    Agent:    "Thanks for the screenshot — I can see two charges there
+               and only one in our records, so I'm bringing in a
+               teammate who can check the payment provider directly.
+               You'll hear back within 4 hours."
+    → escalates with: screenshot, internal charge record, customer ID,
+      audit log (§9.4), and the provider transaction list
+
+    Human then: finds the duplicate authorization, refunds it, and says
+    plainly that it was our mistake. That recovers the customer AND
+    prevents the chargeback fee.
+
+  The instruction to encode: "If the customer provides evidence that
+  conflicts with what you can see, do not assert that your records are
+  correct. Escalate with both, and tell the customer a human is looking."
+  ```
+
+### 21.3 Escalate on intent and history, not just the literal message
+- **Rule:** Route to a human when the complaint is about *expectations* rather
+  than a defect, and when the customer's history suggests the current message
+  isn't the real issue. Sentiment and repeat contact are escalation triggers
+  in their own right.
+- **Explanation:** Two failure shapes, same root cause — the agent answers the
+  literal text. A customer reports a filter as "broken" when it works exactly
+  as designed but not as they expected: there's no error to find, so the agent
+  closes it and the customer feels dismissed. And a furious email about a
+  minor formatting issue usually isn't about formatting; it's about the three
+  unresolved tickets from last month, and the formatting is the last straw.
+  Both need someone who reads *why* the message was sent — one to decide
+  whether the product should change, the other to pick up the phone.
+- **Applies to:** Every automated support path. Stacks: pass the agent the
+  customer's recent ticket history and account health (open tickets, prior
+  escalations, tenure, plan value) as context, and set explicit escalation
+  rules on sentiment and repeat contact rather than leaving it to judgment.
+- **Example:**
+  ```
+  Escalation triggers to encode explicitly:
+
+  INTENT MISMATCH   "It works but that's not what I expected"
+                    · behaves as designed, customer disagrees with design
+                    · a "bug" report with no reproducible error
+                    → human decides: is this a feature request that
+                      other customers also want? Reply either way, and
+                      say what you decided — silence reads as dismissal.
+
+  HISTORY           · 3+ tickets in 30 days, or any prior escalation
+                    · a previously reopened ticket
+                    · anger disproportionate to the reported issue
+                    → human reads the WHOLE history before replying,
+                      and for the worst cases, calls rather than emails
+
+  RISK              · mentions cancelling, refund, legal, chargeback,
+                      "unacceptable", or a competitor
+                    · enterprise or high-value account (§5.3)
+                    → human, immediately, regardless of topic
+
+  Rule for the agent's tone at handoff: acknowledge the frustration,
+  never argue, never explain why the system is right. "I'm getting a
+  teammate who can look at this properly" beats any correction.
+  ```
+
+### 21.4 Measure the handoff — the reopen rate tells you what the agent got wrong
+- **Rule:** Track what the agent closed that later reopened, escalated, or
+  churned. Reopened auto-closed tickets are the highest-signal dataset you
+  have for where the 70/30 line actually sits.
+- **Explanation:** A high automated-resolution rate looks like success and can
+  be the opposite: the agent closing tickets customers didn't consider
+  resolved produces exactly that number, right up until they cancel. Reopens
+  and post-resolution churn are what distinguish a genuinely resolved ticket
+  from a silenced one. This is §14.2's principle in a support context —
+  absence of complaints is absence of signal, and the customer who quietly
+  leaves after being told "everything looks correct" never tells you why.
+- **Applies to:** Every deployment of an automated support agent. Stacks: your
+  ticketing system's reopen data joined to churn (§15.5) and the audit log
+  (§9.4). Review monthly and feed the findings back into the playbooks.
+- **Example:**
+  ```
+  The support scorecard — five numbers, monthly:
+
+    1. Auto-resolution rate       % closed without a human
+    2. REOPEN RATE on those       ← the honest one. Rising = the agent
+                                    is closing things it shouldn't.
+    3. Escalation accuracy        % of escalations a human agreed
+                                    needed escalating (too low = noisy,
+                                    100% = it isn't escalating enough)
+    4. Churn within 30 days of    the number that costs the most and
+       an auto-closed ticket      appears in no support dashboard
+    5. CSAT split                 auto-resolved vs human-resolved
+
+  Then close the loop:
+    reopened ticket → why did the playbook fit when it shouldn't have?
+                    → tighten that playbook's exit condition
+                    → add the case to the escalation triggers (§21.3)
+
+  Warning sign: auto-resolution climbing while reopen rate climbs with
+  it. That is not automation working — that is tickets being closed on
+  customers, and the bill arrives as churn a month later.
+  ```
+
+---
+
+## 22. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
