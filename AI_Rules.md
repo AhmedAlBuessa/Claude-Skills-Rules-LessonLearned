@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–18**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–19**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–18)
+### Part II — What it builds, and the business under it (5–19)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -147,8 +147,14 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [18.2 Nothing ships without passing the pipeline](#182-nothing-ships-without-passing-the-pipeline)
   - [18.3 One-click rollback to the last known good deploy](#183-one-click-rollback-to-the-last-known-good-deploy)
   - [18.4 Database migrations do not roll back — make them backwards-compatible](#184-database-migrations-do-not-roll-back--make-them-backwards-compatible)
+- [19. Testing the Paths You Don't Use](#19-testing-the-paths-you-dont-use)
+  — *your customers are testing them for you, expensively*
+  - [19.1 Test every path, not just the one your team uses](#191-test-every-path-not-just-the-one-your-team-uses)
+  - [19.2 Test on mobile — you build on desktop, your users aren't there](#192-test-on-mobile--you-build-on-desktop-your-users-arent-there)
+  - [19.3 Do the math — testing is a financial decision](#193-do-the-math--testing-is-a-financial-decision)
+  - [19.4 You can't test every combination — detect the gaps in production](#194-you-cant-test-every-combination--detect-the-gaps-in-production)
 
-- [19. Meta](#19-meta)
+- [20. Meta](#20-meta)
 
 ---
 
@@ -163,6 +169,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | A chargeback just landed | [§16.3 evidence workflow](#163-build-the-dispute-response-workflow-before-the-first-dispute) |
 | Exposing an API / integration | [§17](#17-api-design--your-biggest-liability-or-your-best-asset) |
 | A bad deploy is live right now | [§18.3 roll back first](#183-one-click-rollback-to-the-last-known-good-deploy) |
+| Deciding what to test | [§19.3 the CAC math](#193-do-the-math--testing-is-a-financial-decision) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -4621,7 +4628,196 @@ for what gets through anyway. Stop shipping on a prayer.
 
 ---
 
-## 19. Meta
+## 19. Testing the Paths You Don't Use
+
+Your AI ships fast, your team ships fast, and your customers are the first
+people to test anything. That costs more than it looks like it does.
+
+The pattern: checkout works with cards because that's what your team tested.
+A customer pays with PayPal — payment processes, confirmation email never
+fires, they get a blank screen. So they try again. Two charges, no
+confirmation, a dispute, a chargeback fee, and a customer who tells other
+people. The AI built the whole checkout and it worked perfectly on the one
+path somebody asked about.
+
+> Related: the double-charge in that story is an idempotency failure
+> (§12.4) and the blank screen is a missing error state (§12.2). This
+> section is about *finding* those before a customer does.
+
+### 19.1 Test every path, not just the one your team uses
+- **Rule:** Enumerate every branch through a critical flow — every payment
+  method, auth provider, plan type, and role — and have an automated test for
+  each. "It works" means every path works, not the default one.
+- **Explanation:** Your team tests what your team uses, and AI implements what
+  the prompt described; both converge on the happy default. Every alternative
+  branch is written but unexercised, and payment flows are where that costs
+  the most, because the failure is silent on your side and expensive on
+  theirs. Enumerating the paths is the whole trick — most teams have never
+  actually written down how many there are, and the number is usually a
+  surprise.
+- **Applies to:** Checkout, signup/login, onboarding, upload, export, and
+  anything with a provider dropdown. Stacks: Playwright or Cypress for
+  end-to-end, provider sandboxes for the alternatives (Stripe test cards
+  including the decline codes, PayPal sandbox, Apple/Google Pay test
+  accounts). Run them in CI (§18.2), not by hand.
+- **Example:**
+  ```
+  Write the matrix down. It's usually larger than anyone guessed:
+
+    Payment method  card · PayPal · Apple Pay · Google Pay · bank debit
+    Card outcome    success · declined · 3DS challenge · expired · timeout
+    Account state   new user · returning · trialing · past_due (§15.3)
+    Plan            monthly · annual · with coupon · upgrade · downgrade
+    Device          desktop · mobile (§19.2)
+
+    5 × 5 × 4 × 5 × 2 = 1,000 combinations. You will not test 1,000.
+
+  So rank by (traffic share × revenue impact) and automate the top ~15.
+  The rule: EVERY payment method gets at least the success path and one
+  failure path. A method nobody tested is a method you should not offer.
+
+  For each path, assert the WHOLE chain — not just the HTTP 200:
+    [ ] Charge succeeded at the provider
+    [ ] Order row written
+    [ ] Access/entitlement provisioned
+    [ ] Confirmation email actually sent
+    [ ] Success page rendered (not a blank screen)
+    [ ] Retrying the same submit does NOT create a second charge (§12.4)
+  ```
+
+### 19.2 Test on mobile — you build on desktop, your users aren't there
+- **Rule:** Every critical flow is tested at mobile viewport on a real mobile
+  browser, not just a narrowed desktop window. Mobile layout breakage is a
+  release blocker, not a polish item.
+- **Explanation:** You, your team, and your AI all work on desktop, so that's
+  the only rendering anyone sees. Meanwhile a large share of your traffic —
+  often around half for consumer products — is on phones, hitting overlapping
+  sidebars, a pay button below the fold, and file uploads that behave
+  differently in mobile browsers. The financial sting is that these users
+  already cost you acquisition money: they arrived, tried, and left. That's
+  spend converted into nothing, and they never tell you why.
+- **Applies to:** Every web front-end. Stacks: Playwright device emulation
+  for CI, plus real-device checks (iOS Safari and Android Chrome behave
+  differently from emulated Chrome, especially on file inputs, viewport
+  height with the keyboard open, and payment sheets). Check your analytics
+  for your actual desktop/mobile split before deciding priority.
+- **Example:**
+  ```typescript
+  // playwright.config.ts — run the critical suite on both, in CI
+  projects: [
+    { name: 'desktop', use: { ...devices['Desktop Chrome'] } },
+    { name: 'mobile',  use: { ...devices['iPhone 14'] } },
+    { name: 'android', use: { ...devices['Pixel 7'] } },
+  ];
+  ```
+  ```
+  The mobile checks that catch the most real breakage:
+
+  [ ] Primary action visible without scrolling, or sticky at the bottom
+  [ ] Nothing overlaps: sidebar, modal, sticky header, cookie banner
+  [ ] Tap targets ≥ 44px; nothing depends on hover
+  [ ] Forms usable with the keyboard OPEN (it eats ~40% of the viewport)
+  [ ] File upload works from camera roll and camera
+  [ ] Payment sheets (Apple/Google Pay) actually open and complete
+  [ ] Works on a throttled connection, not just office wifi (§12.5)
+  [ ] Landscape doesn't break the layout
+  [ ] No horizontal scroll anywhere — the fastest "this is broken" signal
+
+  Then verify with data: compare conversion rate by device. If mobile
+  converts far below desktop, that gap is a bug, not a preference.
+  ```
+
+### 19.3 Do the math — testing is a financial decision
+- **Rule:** Price your untested paths. Multiply acquisition cost by the share
+  of users hitting a broken path, and compare that to the hours the test would
+  take. Use the number to decide what gets automated.
+- **Explanation:** Testing gets treated as engineering hygiene, so it competes
+  with features and loses. Framed as money it stops being a preference: at $30
+  CAC and 1,000 users, a flow that breaks for 20% of them burns $6,000 of spend
+  you already paid — against roughly two hours to write the test. Most builders
+  never run this calculation, which is why the decision keeps going the wrong
+  way. The true cost is also worse than the raw CAC, because a broken checkout
+  adds chargeback fees (§16.4), support time, and a customer who tells others.
+- **Applies to:** Any product with paid acquisition or a measurable CAC.
+  Stacks: agnostic — this is a spreadsheet, and its job is to justify the
+  engineering time to whoever needs convincing (often yourself).
+- **Example:**
+  ```
+  The calculation, per untested flow:
+
+    Users hitting the flow      1,000 / month
+    × share on the broken path     20%   (e.g. PayPal, or mobile)
+    = users lost                   200
+    × acquisition cost           $ 30
+    = wasted spend               $6,000 / month
+
+    Plus, if it's a payment flow:
+      chargeback fees      200 × ~$15  = $3,000
+      lost lifetime value  200 × LTV   = usually the largest line
+      support time         hours you don't get back
+
+    Cost to prevent: ~2 hours of test writing, once.
+
+  Prioritise by expected loss, not by how interesting the test is:
+
+    Flow                     Traffic  Break cost  Test effort  Do it?
+    ──────────────────────── ───────  ──────────  ───────────  ──────
+    Card checkout (desktop)     45%     $$$$         done       ✓
+    Card checkout (mobile)      35%     $$$$         2h         ✓ NOW
+    PayPal checkout             12%     $$$$         2h         ✓ NOW
+    Coupon redemption            6%     $$           1h         ✓
+    Annual plan upgrade          2%     $$$          2h         ✓
+    Admin bulk export          0.1%     $            4h         later
+
+  Revisit after any pricing, checkout, or acquisition change.
+  ```
+
+### 19.4 You can't test every combination — detect the gaps in production
+- **Rule:** Accept that the matrix is too large to cover, and pair your test
+  suite with production detection: alert when a flow is started but never
+  completed, broken down by the dimensions you couldn't test.
+- **Explanation:** A thousand combinations means testing is always partial, so
+  the honest strategy is tests for the paths you ranked plus instrumentation
+  for everything else. The signal is the same one as §14.2 — intent without
+  outcome. A flow that 40 people started on Android with PayPal and nobody
+  finished is a bug report you'd otherwise never receive, because the affected
+  users left without writing to you. This is also how you find the paths worth
+  promoting into the test suite: production tells you which untested branch is
+  actually costing money.
+- **Applies to:** Every critical flow. Stacks: your §13.3 event stream or
+  product analytics, sliced by device, payment method, plan, and browser —
+  you already emit the events, this is a query and an alert (§14.5).
+- **Example:**
+  ```sql
+  -- Completion rate by segment. The low row is the untested path.
+  SELECT
+    metadata->>'payment_method'                        AS method,
+    metadata->>'device'                                AS device,
+    COUNT(*) FILTER (WHERE action = 'checkout.attempted') AS started,
+    COUNT(*) FILTER (WHERE action = 'checkout.succeeded') AS completed,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE action = 'checkout.succeeded')
+                / NULLIF(COUNT(*) FILTER (WHERE action='checkout.attempted'),0), 1)
+                                                       AS completion_pct
+  FROM usage_events
+  WHERE occurred_at > NOW() - INTERVAL '7 days'
+  GROUP BY 1, 2
+  HAVING COUNT(*) FILTER (WHERE action = 'checkout.attempted') > 20
+  ORDER BY completion_pct ASC;     -- worst segment first = your next bug
+  ```
+  ```
+  Alert when any segment's completion rate falls well below the others
+  (§14.5), then close the loop:
+
+    production finds the broken path
+      → fix it
+      → add it to the test suite (§19.1) so it can't regress
+      → the matrix you actually cover grows from real evidence,
+        not from guessing which paths mattered
+  ```
+
+---
+
+## 20. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
