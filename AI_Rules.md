@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–16**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–17**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–16)
+### Part II — What it builds, and the business under it (5–17)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -134,8 +134,15 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [16.3 Build the dispute response workflow before the first dispute](#163-build-the-dispute-response-workflow-before-the-first-dispute)
   - [16.4 Prevent disputes upstream — most of them are not fraud](#164-prevent-disputes-upstream--most-of-them-are-not-fraud)
   - [16.5 Never let your operating cash live inside the payment processor](#165-never-let-your-operating-cash-live-inside-the-payment-processor)
+- [17. API Design — Your Biggest Liability or Your Best Asset](#17-api-design--your-biggest-liability-or-your-best-asset)
+  — *every endpoint is a door; most are wide open*
+  - [17.1 Never return the raw database record — build the response explicitly](#171-never-return-the-raw-database-record--build-the-response-explicitly)
+  - [17.2 Don't expose internal identifiers — and don't mistake that for authorization](#172-dont-expose-internal-identifiers--and-dont-mistake-that-for-authorization)
+  - [17.3 Rate limit and watch for harvesting — assume every endpoint will be scraped](#173-rate-limit-and-watch-for-harvesting--assume-every-endpoint-will-be-scraped)
+  - [17.4 Treat your API as a product — it is a first impression you don't get to redo](#174-treat-your-api-as-a-product--it-is-a-first-impression-you-dont-get-to-redo)
+  - [17.5 Version from day one — v1 stays stable, v2 adds](#175-version-from-day-one--v1-stays-stable-v2-adds)
 
-- [17. Meta](#17-meta)
+- [18. Meta](#18-meta)
 
 ---
 
@@ -148,6 +155,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | A key leaked | [§8.5 incident runbook](#85-write-the-leak-runbook-before-you-leak--rotate-first-investigate-second) |
 | Adding payments / pricing | [§13](#13-pricing-credits--usage-metering), then [§15](#15-dunning--recovering-failed-payments), then [§16](#16-chargebacks--payment-disputes) |
 | A chargeback just landed | [§16.3 evidence workflow](#163-build-the-dispute-response-workflow-before-the-first-dispute) |
+| Exposing an API / integration | [§17](#17-api-design--your-biggest-liability-or-your-best-asset) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -4052,7 +4060,387 @@ Your first dispute is not a question of if. It's when.
 
 ---
 
-## 17. Meta
+## 17. API Design — Your Biggest Liability or Your Best Asset
+
+Every endpoint your product exposes is a door into your business. Most of
+those doors are wide open, and you don't know what's walking out.
+
+The failure needs no sophistication at all. Your AI built an API that returns
+*everything* — every field, every internal ID, every relationship. An attacker
+doesn't need to breach your database; they call your API and read the JSON.
+Your user endpoint returns email, phone, billing address, and a sequential
+internal ID — so they increment the number and walk your entire user table.
+
+Three things to fix: **stop giving away data the client never needed**,
+**treat the API as a product technical buyers will judge you on**, and
+**version it from day one** so you don't break the integrations your customers
+built on it.
+
+> Related: §8.2's auth review is the *authorization* half (can this caller
+> touch this record?). This section is the *exposure* half (what comes back,
+> and how much can be harvested). Both are required — a perfectly
+> authorized endpoint that returns 40 unnecessary fields is still a leak.
+
+### 17.1 Never return the raw database record — build the response explicitly
+- **Rule:** Every endpoint returns an explicitly constructed shape containing
+  only the fields that client actually needs. Never serialize a database row
+  or ORM object straight to JSON. Audit every existing endpoint and strip
+  everything the client doesn't use.
+- **Explanation:** `res.json(user)` is the single most common data leak in
+  AI-generated APIs, and it's invisible in testing because the feature works
+  perfectly — the extra fields just ride along. The moment someone adds a
+  column (`stripe_customer_id`, `internal_notes`, `password_reset_token`,
+  `is_admin`, `referral_source`), it silently starts shipping to every client
+  that calls that endpoint, including clients you didn't write. An allowlist
+  inverts the risk: new columns are private by default and become public only
+  when you deliberately add them. It also makes the leak reviewable — a
+  reviewer can read the response shape and see exactly what leaves the server,
+  which is impossible when the shape is "whatever the table has today."
+- **Applies to:** Every REST, GraphQL, tRPC, or RPC endpoint. Stacks: Prisma
+  `select` (never bare `findMany()`), Django REST Framework serializers with
+  explicit `fields` (never `__all__`), Rails `ActiveModel::Serializer` or
+  `jbuilder`, Zod/`valibot` output schemas, GraphQL — where the risk inverts:
+  the *schema* is the allowlist, so never expose an internal type wholesale,
+  and use field-level auth plus query depth/complexity limits.
+- **Example:**
+  ```typescript
+  // WRONG — the leak. Works perfectly. Ships everything.
+  app.get('/api/users/:id', requireAuth, async (req, res) => {
+    const user = await db.users.findUnique({ where: { id: req.params.id } });
+    res.json(user);
+    // → passwordHash, stripeCustomerId, internalNotes, isAdmin,
+    //   twoFactorSecret, referralSource, deletedAt, and every column
+    //   anyone adds next quarter.
+  });
+
+  // RIGHT — explicit shape. New columns are private until you say otherwise.
+  const PublicUser = z.object({
+    id:        z.string(),
+    name:      z.string(),
+    avatarUrl: z.string().nullable(),
+  });
+
+  app.get('/api/users/:id', requireAuth, async (req, res) => {
+    const user = await db.users.findFirst({
+      where:  { id: req.params.id, orgId: req.user.orgId },  // authz (§8.2)
+      select: { id: true, name: true, avatarUrl: true },     // exposure
+    });
+    if (!user) return res.status(404).end();
+    res.json(PublicUser.parse(user));   // parse = the shape is enforced,
+  });                                   // not just intended
+  ```
+  ```
+  The endpoint audit — run this on every route you have:
+
+  For each endpoint, list every field in the response and ask:
+    [ ] Does the CLIENT actually read this field? (grep the front-end —
+        if nothing reads it, delete it)
+    [ ] Would I be comfortable if this field appeared in a public paste?
+    [ ] Is it an internal identifier? (§17.2)
+    [ ] Is it someone ELSE's data? (a nested `createdBy` object that
+        drags in another user's email is the classic case)
+    [ ] Does it reveal business internals — margins, costs, internal
+        status codes, feature flags, other customers' names?
+
+  Fields that should almost never leave the server:
+    ✗ password hashes, tokens, 2FA secrets, session IDs, API keys
+    ✗ Stripe customer/subscription IDs, internal billing state
+    ✗ internal_notes, admin_flags, risk_scores, moderation state
+    ✗ raw timestamps of internal jobs, soft-delete markers
+    ✗ full objects of RELATED users — return an id and a display name
+    ✗ anything in a `metadata` or `settings` JSON blob you haven't read
+      recently  ← blobs are where leaks hide, because nobody audits them
+  ```
+
+### 17.2 Don't expose internal identifiers — and don't mistake that for authorization
+- **Rule:** Use opaque, non-sequential public identifiers (UUIDv4/v7, ULID, or
+  a prefixed public ID) in URLs and responses. Keep sequential integer primary
+  keys internal. **And still enforce ownership on every request** — opaque IDs
+  are obfuscation, not access control.
+- **Explanation:** Sequential IDs let anyone enumerate your entire dataset by
+  counting: `/api/users/1`, `/api/users/2`, `/api/users/3`. Even when each
+  request is properly authorized and returns 403, the *pattern of responses*
+  leaks your customer count, growth rate, and signup ordering — competitive
+  intelligence you're publishing for free. Opaque IDs remove that, but here's
+  the part people get wrong: switching to UUIDs does **not** fix IDOR. If your
+  handler doesn't check ownership, an attacker who obtains one UUID (from a
+  shared link, a screenshot, a referrer header, a leaked log) still reads that
+  record. The ID makes guessing impractical; the ownership check makes access
+  impossible. You need both, and only one of them is security.
+- **Applies to:** Every resource exposed in a URL, response body, webhook
+  payload, or email link. Stacks: Postgres `uuid` or ULID columns, Prisma
+  `@default(uuid())`, Stripe-style prefixed IDs (`cus_`, `sub_` — readable and
+  self-describing in logs), hashids only as a last resort on legacy integer
+  keys. Note that UUIDv4 is random while UUIDv7 is time-ordered — v7 indexes
+  better but leaks creation time, so pick deliberately.
+- **Example:**
+  ```sql
+  -- Two identifiers: one internal, one public. Never conflate them.
+  CREATE TABLE orders (
+    id          BIGSERIAL PRIMARY KEY,        -- internal, never exposed
+    public_id   TEXT UNIQUE NOT NULL          -- exposed in URLs and JSON
+                DEFAULT ('ord_' || encode(gen_random_bytes(12), 'hex')),
+    account_id  UUID NOT NULL,
+    ...
+  );
+  CREATE INDEX ON orders (public_id);
+  ```
+  ```typescript
+  // Both controls, together. Neither one alone is sufficient.
+  app.get('/api/orders/:publicId', requireAuth, async (req, res) => {
+    const order = await db.orders.findFirst({
+      where: {
+        publicId:  req.params.publicId,   // ← opaque: can't be enumerated
+        accountId: req.user.accountId,    // ← authz: can't be borrowed
+      },
+      select: { publicId: true, total: true, status: true, createdAt: true },
+    });
+    if (!order) return res.status(404).end();   // 404, not 403 — don't
+    res.json(order);                            // confirm it exists (§8.2)
+  });
+  ```
+  ```
+  What sequential IDs give away, even when every request is authorized:
+
+    GET /api/users/1     → 403     "the app has been live a while"
+    GET /api/users/9481  → 403     "~9,481 users exist"
+    GET /api/users/9482  → 404     "…and that's the current ceiling"
+
+    Sign up two accounts a week apart, compare your own IDs → exact
+    weekly growth rate. Competitors do this. It costs them ten minutes.
+
+  Also check for leaked internals in these easy-to-forget places:
+    · Sequential invoice/order numbers on customer-facing PDFs
+    · Autoincrement IDs in email links and unsubscribe URLs
+    · Internal IDs in error messages ("user 4471 not found")
+    · Row counts in pagination metadata ("total": 9481)  ← same leak,
+      different door. Use cursor pagination for public endpoints.
+    · Webhook payloads, which are just an API you forgot you shipped
+  ```
+
+### 17.3 Rate limit and watch for harvesting — assume every endpoint will be scraped
+- **Rule:** Rate limit every endpoint by authenticated identity (not just IP),
+  set tighter limits on anything that returns personal data or accepts
+  credentials, and alert when one caller's request pattern looks like
+  enumeration rather than use.
+- **Explanation:** Correct field filtering and opaque IDs stop the cheap
+  attack; they don't stop a determined caller with a valid account pulling
+  your data one legitimate request at a time. Volume is the signal that
+  separates a user from a harvester — a real customer views 30 records a day,
+  a scraper views 30,000. IP-based limits alone are close to useless now that
+  rotating residential proxies are commodity, which is why the limit has to
+  key on the account or API key. This is also the enterprise-readiness answer
+  (§5.3): "how do you prevent bulk extraction of our data?" is a standard
+  security-review question, and "we rate limit per key and alert on anomalies"
+  is the answer that passes.
+- **Applies to:** Every public and authenticated endpoint. Sharpest on
+  auth (login, password reset, signup), search, list endpoints, and anything
+  returning PII. Stacks: Upstash Ratelimit / `express-rate-limit` /
+  `@fastify/rate-limit`, Cloudflare or your CDN's rate limiting at the edge,
+  Redis token buckets, plus §14.5 alerting on the anomaly signal.
+- **Example:**
+  ```typescript
+  // Tiered limits — the sensitive endpoints get the strict ones.
+  const limits = {
+    'auth.login':          { window: '15m', max: 5,    by: 'ip+email' },
+    'auth.passwordReset':  { window: '1h',  max: 3,    by: 'ip+email' },
+    'api.read':            { window: '1m',  max: 100,  by: 'apiKey'   },
+    'api.write':           { window: '1m',  max: 20,   by: 'apiKey'   },
+    'api.listUsers':       { window: '1m',  max: 10,   by: 'apiKey'   },  // PII
+    'api.export':          { window: '1h',  max: 5,    by: 'account'  },
+  };
+
+  // Always tell the caller the truth — silent throttling looks like a bug
+  res.setHeader('RateLimit-Limit', limit);
+  res.setHeader('RateLimit-Remaining', remaining);
+  res.setHeader('RateLimit-Reset', resetAt);
+  if (blocked) {
+    res.setHeader('Retry-After', secondsUntilReset);   // §12.3 honors this
+    return res.status(429).json({ error: { code: 'RATE_LIMITED',
+      message: "You're making requests too quickly.",
+      retryAfterSeconds: secondsUntilReset }});
+  }
+  ```
+  ```sql
+  -- The harvesting detector: distinct records touched, not request count.
+  -- A caller reading 4,000 different customers in an hour is not "using"
+  -- your product, whatever their request rate looks like.
+  SELECT api_key_id,
+         COUNT(DISTINCT target_id)                    AS distinct_records,
+         COUNT(*)                                     AS requests,
+         COUNT(DISTINCT target_id)::float / COUNT(*)  AS uniqueness_ratio
+  FROM api_access_log
+  WHERE occurred_at > NOW() - INTERVAL '1 hour'
+    AND endpoint LIKE '/api/users%'
+  GROUP BY api_key_id
+  HAVING COUNT(DISTINCT target_id) > 500
+  ORDER BY distinct_records DESC;
+  -- uniqueness_ratio near 1.0 = every request hits a NEW record.
+  -- That is enumeration. Real usage revisits the same records.
+  ```
+  ```
+  Alert on (§14.5), then decide — don't auto-ban a paying customer:
+
+    · Distinct records accessed by one key > 10x its 30-day baseline
+    · Uniqueness ratio near 1.0 sustained over an hour
+    · Sequential or alphabetical access ordering  ← nobody browses that way
+    · Traffic from a new ASN/region for an established key
+    · 404 rate spiking on one key → they're guessing IDs
+    · Access outside the customer's normal hours, at machine speed
+
+  Response ladder: alert → contact the customer → throttle → suspend.
+  A legitimate integration doing a bulk sync looks identical to an
+  attack; the difference is a conversation, not a heuristic.
+  ```
+
+### 17.4 Treat your API as a product — it is a first impression you don't get to redo
+- **Rule:** Design the API as something a technical buyer will evaluate:
+  consistent naming and shapes, predictable errors, real pagination, honest
+  documentation. Assume every integration partner reads it before they read
+  your marketing.
+- **Explanation:** If you ever want integrations, partnerships, or enterprise
+  API access, the API *is* the sales collateral — and technical reviewers read
+  it as a proxy for engineering maturity. An API returning unfiltered records
+  with sequential IDs and ad-hoc error shapes tells a reviewer everything
+  about how the rest of the system was built. They won't file a complaint or
+  give you feedback; they'll quietly pick the competitor whose API looks
+  intentional. That's the expensive part — the loss is silent, so you never
+  learn it happened. And unlike a landing page, an API you've shipped to
+  customers can't simply be redone (§17.5).
+- **Applies to:** Any product that will ever expose an API — public,
+  partner-only, or a documented webhook. Also worth applying to internal APIs,
+  because today's internal endpoint is next year's partner endpoint. Stacks:
+  OpenAPI/Swagger generated from code (never hand-maintained — it drifts),
+  Stripe/Twilio/GitHub as the reference standard for shape and tone, Scalar
+  or Mintlify for docs.
+- **Example:**
+  ```
+  What a reviewer checks in the first ten minutes — score yourself:
+
+  [ ] Consistent naming: snake_case OR camelCase, everywhere, no mixing
+  [ ] Consistent shapes: a list endpoint always returns the same envelope
+  [ ] Predictable errors: ONE error format across every endpoint, with a
+      stable machine-readable code, a human message, and a request ID (§12.1)
+  [ ] Real pagination: cursor-based with a documented limit — never
+      "returns everything" and never offset pagination on large tables
+  [ ] Filtering and sorting that are documented and actually work
+  [ ] Idempotency keys supported on writes (§12.4)
+  [ ] Timestamps in ISO 8601 with timezone, always UTC
+  [ ] Money as integer minor units + currency code, never a float
+  [ ] Enums documented with all possible values, and new values added
+      without breaking clients
+  [ ] Webhooks: signed, retried with backoff, idempotent, replayable
+  [ ] Auth: documented, scoped keys (§8.4), revocable, with expiry
+  [ ] Rate limits: documented, with headers (§17.3)
+  [ ] Docs generated from the code, with copy-pasteable curl examples
+  [ ] A sandbox/test mode (§9.2) so they can build without real money
+  ```
+  ```json
+  // One error envelope, everywhere. This alone signals more maturity
+  // than most of the rest combined.
+  {
+    "error": {
+      "type": "invalid_request_error",
+      "code": "parameter_missing",
+      "message": "Missing required parameter: 'amount'.",
+      "param": "amount",
+      "doc_url": "https://docs.example.com/errors/parameter_missing",
+      "request_id": "req_8f3a2c19"
+    }
+  }
+
+  // One list envelope, everywhere. Cursor-based, so it stays correct
+  // while the underlying data changes.
+  {
+    "object": "list",
+    "data": [ /* … */ ],
+    "has_more": true,
+    "next_cursor": "cur_9d2b"
+  }
+  ```
+
+### 17.5 Version from day one — v1 stays stable, v2 adds
+- **Rule:** Ship your API versioned from the first public call. Version 1 stays
+  backwards-compatible forever (or until a published deprecation completes);
+  new capabilities go in v2. Customers migrate on their own timeline, not
+  yours.
+- **Explanation:** The moment someone builds an integration against your
+  response structure, that structure is a contract — whether or not you wrote
+  one down. Rename a field and their integration breaks, in their production,
+  in front of their users, with no warning. They'll call it a bug and, on the
+  second occurrence, they'll leave. Versioning is what lets you keep shipping
+  without that being the cost: additive changes are safe, breaking changes get
+  a new version, and the deprecation timeline is published rather than
+  improvised. Adding a version prefix on day one is free; retrofitting one
+  onto an API with live customers means running both shapes anyway — you just
+  do it without the URL that would have made it manageable.
+- **Applies to:** Every externally-consumed API, including partner webhooks
+  and anything a customer's script calls. Stacks: URL versioning (`/v1/`) is
+  the clearest and easiest to route; header versioning
+  (`Api-Version: 2026-07-30`, the Stripe date-based model) scales better for
+  frequent changes. Pick one and never mix them.
+- **Example:**
+  ```
+  What is SAFE to add to a stable version (additive, non-breaking):
+    ✓ A new optional field in a response
+    ✓ A new optional request parameter with a sensible default
+    ✓ A new endpoint
+    ✓ A new value in an enum — IF you documented that clients must
+      tolerate unknown values (say this in the docs from day one)
+
+  What REQUIRES a new version (breaking):
+    ✗ Renaming or removing a field
+    ✗ Changing a field's type ("42" → 42) or its units (dollars → cents)
+    ✗ Making an optional request parameter required
+    ✗ Changing default behavior, sort order, or pagination size
+    ✗ Changing an error code, or an HTTP status for the same condition
+    ✗ Tightening validation on input you previously accepted
+    ✗ Removing an endpoint
+
+  The one people miss: adding a REQUIRED field to a request body is
+  breaking even though it "just adds." Every existing caller now fails.
+  ```
+  ```typescript
+  // Route by version at the edge; keep handlers separate, not branchy.
+  app.use('/v1', v1Router);   // frozen: bug fixes and additive only
+  app.use('/v2', v2Router);   // current: new capabilities land here
+
+  // Tell callers what they're using and where it stands — in every response
+  res.setHeader('Api-Version', 'v1');
+  res.setHeader('Deprecation', 'Sun, 01 Nov 2026 00:00:00 GMT');  // if sunset
+  res.setHeader('Sunset',      'Sun, 01 Feb 2027 00:00:00 GMT');
+  res.setHeader('Link', '<https://docs.example.com/migrate/v2>; rel="deprecation"');
+  ```
+  ```
+  Deprecation policy — publish it BEFORE you need it (§10.4 applies:
+  what you publish, you're held to):
+
+    T-6 months   Announce v1 deprecation: email every API key owner,
+                 changelog post, docs banner, migration guide with
+                 concrete before/after diffs
+    T-3 months   Deprecation headers on every v1 response.
+                 Email the accounts still on v1 — you know exactly
+                 who they are from your API logs.
+    T-1 month    Direct outreach to remaining v1 callers. Offer help.
+    T-1 week     Brownout: return 410 for one hour, twice, at announced
+                 times. Nothing surfaces a forgotten integration like
+                 a scheduled, reversible failure.
+    T-0          Sunset v1.
+
+    Minimum 6 months for a paid API. 12 for enterprise contracts —
+    and check what your contracts actually committed you to (§10.3).
+
+  Track who is on what, so none of this is guesswork:
+    SELECT api_version, COUNT(DISTINCT api_key_id) AS customers,
+           COUNT(*) AS calls, MAX(occurred_at) AS last_seen
+    FROM api_access_log
+    WHERE occurred_at > NOW() - INTERVAL '30 days'
+    GROUP BY api_version ORDER BY api_version;
+  ```
+
+---
+
+## 18. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
