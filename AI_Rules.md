@@ -6,6 +6,151 @@ non-negotiables. When in doubt, follow the rule; when the rule is silent,
 follow the spirit of it (small blast radius, reversible steps, ask before
 acting on anything the user did not clearly authorize).
 
+**How to read this.** Every rule follows the same four-part shape:
+
+| Part | What it gives you |
+|------|-------------------|
+| **Rule** | The do/don't, in one line |
+| **Explanation** | Why it exists, in plain language |
+| **Applies to** | Which project types and stacks it's relevant for |
+| **Example** | Runnable code, a schema, or a checklist you can copy |
+
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–15**
+govern what it builds and the business underneath it — those came from real
+incidents and audits, so the explanations carry the *why* along with the fix.
+
+---
+
+## Table of Contents
+
+### Part I — How the agent works (1–4)
+
+- [1. General AI Assistant Rules](#1-general-ai-assistant-rules)
+  - [1.1 Scope discipline](#11-scope-discipline)
+  - [1.2 Comments and docs](#12-comments-and-docs)
+  - [1.3 Error handling](#13-error-handling)
+  - [1.4 Communication with the user](#14-communication-with-the-user)
+- [2. Claude Code-Specific Rules](#2-claude-code-specific-rules)
+  - [2.1 Tool selection](#21-tool-selection)
+  - [2.2 Plans and tasks](#22-plans-and-tasks)
+  - [2.3 Permission mode and destructive tools](#23-permission-mode-and-destructive-tools)
+  - [2.4 Context and memory](#24-context-and-memory)
+- [3. Security & Secrets Rules](#3-security--secrets-rules)
+  - [3.1 Secrets](#31-secrets)
+  - [3.2 Network calls from tools](#32-network-calls-from-tools)
+  - [3.3 Destructive commands](#33-destructive-commands)
+  - [3.4 Dependencies](#34-dependencies)
+  - [3.5 Elevation / admin](#35-elevation--admin)
+- [4. Git / PR Workflow Rules](#4-git--pr-workflow-rules)
+  - [4.1 Branching](#41-branching)
+  - [4.2 Commits](#42-commits)
+  - [4.3 Pushing](#43-pushing)
+  - [4.4 Pull requests](#44-pull-requests)
+  - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
+
+### Part II — What it builds, and the business under it (5–15)
+
+- [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
+  — *who your stack lets you sell to*
+  - [5.1 Accept the AI-picked bundled stack as your starting point](#51-accept-the-ai-picked-bundled-stack-as-your-starting-point)
+  - [5.2 Your first 10 customers must be SMB, not enterprise](#52-your-first-10-customers-must-be-smb-not-enterprise)
+  - [5.3 Enterprise is not customer #11 — it is customer #100](#53-enterprise-is-not-customer-11--it-is-customer-100)
+  - [5.4 Document your customer ceiling explicitly](#54-document-your-customer-ceiling-explicitly)
+  - [5.5 An AI-directed engineer decides what to say "yes" and "not yet" to](#55-an-ai-directed-engineer-decides-what-to-say-yes-and-not-yet-to)
+- [6. Data Retention & Deletion Rules](#6-data-retention--deletion-rules)
+  — *why "delete my account" can be illegal to honor in full*
+  - [6.1 "Delete my account" does not mean "delete all data"](#61-delete-my-account-does-not-mean-delete-all-data)
+  - [6.2 Build a data retention policy engine, not a boolean flag](#62-build-a-data-retention-policy-engine-not-a-boolean-flag)
+  - [6.3 Map the retention schedule to your ACTUAL obligations — do not guess](#63-map-the-retention-schedule-to-your-actual-obligations--do-not-guess)
+  - [6.4 Every retention/deletion action must produce an audit trail](#64-every-retentiondeletion-action-must-produce-an-audit-trail)
+  - [6.5 Research retention obligations BEFORE the first user asks to leave](#65-research-retention-obligations-before-the-first-user-asks-to-leave)
+- [7. Content Machine & Audience Growth Rules](#7-content-machine--audience-growth-rules)
+  — *organic growth as an engineered system*
+  - [7.1 Run a weekly content audit — kill what flops, double down on what works](#71-run-a-weekly-content-audit--kill-what-flops-double-down-on-what-works)
+  - [7.2 Give away your best work for free — optimize for saves and shares](#72-give-away-your-best-work-for-free--optimize-for-saves-and-shares)
+  - [7.3 Reply to every comment and DM — engagement is the distribution engine](#73-reply-to-every-comment-and-dm--engagement-is-the-distribution-engine)
+  - [7.4 Build the system, then show up daily — no budget required](#74-build-the-system-then-show-up-daily--no-budget-required)
+  - [7.5 Do not automate authenticity — automate measurement and triage only](#75-do-not-automate-authenticity--automate-measurement-and-triage-only)
+- [8. Vibe Coding & The Pre-Production Security Pass](#8-vibe-coding--the-pre-production-security-pass)
+  — *the $2,500 Stripe key leak, and the 20 minutes that prevents it*
+  - [8.1 Vibe code to 80%, engineer the last 20% — never ship AI output straight to production](#81-vibe-code-to-80-engineer-the-last-20--never-ship-ai-output-straight-to-production)
+  - [8.2 Run a 20-minute security pass on every AI-generated commit before it reaches production](#82-run-a-20-minute-security-pass-on-every-ai-generated-commit-before-it-reaches-production)
+  - [8.3 Assume the platform protects nothing — no sandboxing, no scanning, no least privilege by default](#83-assume-the-platform-protects-nothing--no-sandboxing-no-scanning-no-least-privilege-by-default)
+  - [8.4 Least privilege on every credential — make a leak boring](#84-least-privilege-on-every-credential--make-a-leak-boring)
+  - [8.5 Write the leak runbook before you leak — rotate first, investigate second](#85-write-the-leak-runbook-before-you-leak--rotate-first-investigate-second)
+- [9. The Three Gaps in Almost Every AI-Built App](#9-the-three-gaps-in-almost-every-ai-built-app)
+  — *the pattern across 2,000+ audited apps*
+  - [9.1 Build the unhappy path — your users live there more than you think](#91-build-the-unhappy-path--your-users-live-there-more-than-you-think)
+  - [9.2 Never share a database, API key, or config between development and production](#92-never-share-a-database-api-key-or-config-between-development-and-production)
+  - [9.3 Keep test data out of production tables](#93-keep-test-data-out-of-production-tables)
+  - [9.4 Log every sensitive action — your AI built the actions, not the receipts](#94-log-every-sensitive-action--your-ai-built-the-actions-not-the-receipts)
+  - [9.5 Add the three gaps to your definition of done](#95-add-the-three-gaps-to-your-definition-of-done)
+- [10. Protecting the Business Under the Product](#10-protecting-the-business-under-the-product)
+  — *insurance, platform liability caps, honest privacy policies*
+  - [10.1 Buy cyber liability insurance before you launch, not after the incident](#101-buy-cyber-liability-insurance-before-you-launch-not-after-the-incident)
+  - [10.2 Treat the security audit as a coverage prerequisite, not a nice-to-have](#102-treat-the-security-audit-as-a-coverage-prerequisite-not-a-nice-to-have)
+  - [10.3 Read your platform's terms — their liability is capped at roughly what you paid them](#103-read-your-platforms-terms--their-liability-is-capped-at-roughly-what-you-paid-them)
+  - [10.4 Your privacy policy must describe what the app actually does](#104-your-privacy-policy-must-describe-what-the-app-actually-does)
+  - [10.5 Run a pre-launch business-protection gate](#105-run-a-pre-launch-business-protection-gate)
+- [11. Dynamic Secrets & Credential Lifecycle](#11-dynamic-secrets--credential-lifecycle)
+  — *shrink a leak's blast radius from infinite to one session*
+  - [11.1 Stop using static, long-lived credentials — generate them on demand](#111-stop-using-static-long-lived-credentials--generate-them-on-demand)
+  - [11.2 Scope credentials per service — least privilege enforced by the engine, not by trust](#112-scope-credentials-per-service--least-privilege-enforced-by-the-engine-not-by-trust)
+  - [11.3 Audit-log every secret access — who, when, from where, for what](#113-audit-log-every-secret-access--who-when-from-where-for-what)
+  - [11.4 If a secrets engine is too heavy today, climb the ladder — don't stay static](#114-if-a-secrets-engine-is-too-heavy-today-climb-the-ladder--dont-stay-static)
+- [12. The Happy Path Trap — Error Handling Implementation](#12-the-happy-path-trap--error-handling-implementation)
+  — *the code behind §9.1*
+  - [12.1 Wrap every external call — payments, APIs, databases, all of them](#121-wrap-every-external-call--payments-apis-databases-all-of-them)
+  - [12.2 Every component implements all four states — no exceptions](#122-every-component-implements-all-four-states--no-exceptions)
+  - [12.3 Retry with exponential backoff — 1s, 2s, 4s — then fail gracefully](#123-retry-with-exponential-backoff--1s-2s-4s--then-fail-gracefully)
+  - [12.4 Only retry what is safe to retry — idempotency before backoff](#124-only-retry-what-is-safe-to-retry--idempotency-before-backoff)
+  - [12.5 Never freeze the UI — the user always knows what's happening](#125-never-freeze-the-ui--the-user-always-knows-whats-happening)
+- [13. Pricing, Credits & Usage Metering](#13-pricing-credits--usage-metering)
+  — *how to charge, and the event stream you can't build retroactively*
+  - [13.1 Pick the pricing metric that scales with the customer's success](#131-pick-the-pricing-metric-that-scales-with-the-customers-success)
+  - [13.2 Implement a credit system to decouple price from cost](#132-implement-a-credit-system-to-decouple-price-from-cost)
+  - [13.3 Build the usage event stream from day one — one source of truth](#133-build-the-usage-event-stream-from-day-one--one-source-of-truth)
+  - [13.4 Metering must be idempotent, immutable, and reconciled](#134-metering-must-be-idempotent-immutable-and-reconciled)
+  - [13.5 Migrate existing free users deliberately — grandfather on purpose](#135-migrate-existing-free-users-deliberately--grandfather-on-purpose)
+- [14. Observability — Error Tracking & Logs](#14-observability--error-tracking--logs)
+  — *find out in minutes, not weeks*
+  - [14.1 Deploy error tracking before launch — front-end and back-end](#141-deploy-error-tracking-before-launch--front-end-and-back-end)
+  - [14.2 Silence is not health — assume the errors you can't see are the expensive ones](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones)
+  - [14.3 Make every error actionable — source maps, releases, user context, breadcrumbs](#143-make-every-error-actionable--source-maps-releases-user-context-breadcrumbs)
+  - [14.4 Log structurally, with one correlation ID across the whole stack](#144-log-structurally-with-one-correlation-id-across-the-whole-stack)
+  - [14.5 Alert on signal, not noise — every alert needs an owner and an action](#145-alert-on-signal-not-noise--every-alert-needs-an-owner-and-an-action)
+  - [14.6 Scrub PII and secrets before telemetry leaves your app](#146-scrub-pii-and-secrets-before-telemetry-leaves-your-app)
+- [15. Dunning — Recovering Failed Payments](#15-dunning--recovering-failed-payments)
+  — *the revenue leaving through the back door*
+  - [15.1 A failed charge is a recoverable event, not a final answer](#151-a-failed-charge-is-a-recoverable-event-not-a-final-answer)
+  - [15.2 Tell the customer — build the failed-payment email sequence](#152-tell-the-customer--build-the-failed-payment-email-sequence)
+  - [15.3 Grace period before cancellation — never hard-cut on first failure](#153-grace-period-before-cancellation--never-hard-cut-on-first-failure)
+  - [15.4 Prevent the failure upstream — expiring cards, account updater, pre-dunning](#154-prevent-the-failure-upstream--expiring-cards-account-updater-pre-dunning)
+  - [15.5 Measure involuntary churn separately — you can't fix what you can't see](#155-measure-involuntary-churn-separately--you-cant-fix-what-you-cant-see)
+
+- [16. Meta](#16-meta)
+
+---
+
+## Quick lookup — "I need to do X"
+
+| Situation | Go to |
+|-----------|-------|
+| About to launch | [§10.5 pre-launch gate](#105-run-a-pre-launch-business-protection-gate), [§6.5](#65-research-retention-obligations-before-the-first-user-asks-to-leave), [§14.1](#141-deploy-error-tracking-before-launch--front-end-and-back-end) |
+| Shipping AI-written code to prod | [§8.2 the 20-minute pass](#82-run-a-20-minute-security-pass-on-every-ai-generated-commit-before-it-reaches-production) |
+| A key leaked | [§8.5 incident runbook](#85-write-the-leak-runbook-before-you-leak--rotate-first-investigate-second) |
+| Adding payments / pricing | [§13](#13-pricing-credits--usage-metering), then [§15](#15-dunning--recovering-failed-payments) |
+| Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
+| An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
+| A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
+| Revenue is quietly dropping | [§15.5](#155-measure-involuntary-churn-separately--you-cant-fix-what-you-cant-see) |
+| Setting up a new repo for AI work | [§9.5 definition of done](#95-add-the-three-gaps-to-your-definition-of-done) |
+
+**Artifacts this document tells you to create:** `CUSTOMER_CEILING.md` (§5.4) ·
+`RETENTION_SCHEDULE.md` (§6.3) · `INCIDENT_RUNBOOK.md` (§8.5) ·
+`SECURITY_POSTURE.md` (§10.2) · `VENDOR_RISK.md` (§10.3) ·
+`LAUNCH_READINESS.md` (§10.5) · `SECRETS_POSTURE.md` (§11.4)
+
 ---
 
 ## 1. General AI Assistant Rules
