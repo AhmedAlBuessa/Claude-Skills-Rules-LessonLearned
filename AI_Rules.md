@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–15**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–16**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–15)
+### Part II — What it builds, and the business under it (5–16)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -127,8 +127,15 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [15.3 Grace period before cancellation — never hard-cut on first failure](#153-grace-period-before-cancellation--never-hard-cut-on-first-failure)
   - [15.4 Prevent the failure upstream — expiring cards, account updater, pre-dunning](#154-prevent-the-failure-upstream--expiring-cards-account-updater-pre-dunning)
   - [15.5 Measure involuntary churn separately — you can't fix what you can't see](#155-measure-involuntary-churn-separately--you-cant-fix-what-you-cant-see)
+- [16. Chargebacks & Payment Disputes](#16-chargebacks--payment-disputes)
+  — *your first dispute is a when, not an if*
+  - [16.1 Publish a refund policy that matches your actual terms](#161-publish-a-refund-policy-that-matches-your-actual-terms)
+  - [16.2 Alert on your dispute rate before the processor acts on it](#162-alert-on-your-dispute-rate-before-the-processor-acts-on-it)
+  - [16.3 Build the dispute response workflow before the first dispute](#163-build-the-dispute-response-workflow-before-the-first-dispute)
+  - [16.4 Prevent disputes upstream — most of them are not fraud](#164-prevent-disputes-upstream--most-of-them-are-not-fraud)
+  - [16.5 Never let your operating cash live inside the payment processor](#165-never-let-your-operating-cash-live-inside-the-payment-processor)
 
-- [16. Meta](#16-meta)
+- [17. Meta](#17-meta)
 
 ---
 
@@ -139,7 +146,8 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | About to launch | [§10.5 pre-launch gate](#105-run-a-pre-launch-business-protection-gate), [§6.5](#65-research-retention-obligations-before-the-first-user-asks-to-leave), [§14.1](#141-deploy-error-tracking-before-launch--front-end-and-back-end) |
 | Shipping AI-written code to prod | [§8.2 the 20-minute pass](#82-run-a-20-minute-security-pass-on-every-ai-generated-commit-before-it-reaches-production) |
 | A key leaked | [§8.5 incident runbook](#85-write-the-leak-runbook-before-you-leak--rotate-first-investigate-second) |
-| Adding payments / pricing | [§13](#13-pricing-credits--usage-metering), then [§15](#15-dunning--recovering-failed-payments) |
+| Adding payments / pricing | [§13](#13-pricing-credits--usage-metering), then [§15](#15-dunning--recovering-failed-payments), then [§16](#16-chargebacks--payment-disputes) |
+| A chargeback just landed | [§16.3 evidence workflow](#163-build-the-dispute-response-workflow-before-the-first-dispute) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -3673,7 +3681,378 @@ noticed customers walking out the back.
 
 ---
 
-## 16. Meta
+## 16. Chargebacks & Payment Disputes
+
+Rules for the day a customer disputes a charge. The scenario: a dispute
+arrives, and you have **no published refund policy, no response template, no
+threshold alerts** — because your AI built the revenue engine and none of the
+things that protect it.
+
+Three things close the gap: **a published refund policy that matches your
+actual terms**, **chargeback threshold alerts**, and **a dispute response
+workflow with evidence ready before you need it**.
+
+Your first dispute is not a question of if. It's when.
+
+> **One correction to how this is usually told.** A single dispute does not
+> normally freeze a Stripe account. What triggers payout pauses, rolling
+> reserves, or termination is a *pattern*: a dispute rate crossing card-network
+> thresholds, a sudden volume spike, or fraud signals. That distinction
+> matters because it tells you what to actually monitor — the **rate**, not
+> the first incident. The underlying warning stands: processors can and do
+> pause payouts, and a business whose runway lives entirely inside its payment
+> processor is one review away from missing payroll (§16.5).
+>
+> Dollar and percentage thresholds below are indicative — card-network
+> programs change. Verify current numbers in your provider's dashboard.
+
+### 16.1 Publish a refund policy that matches your actual terms
+- **Rule:** Write your own refund policy — not the processor's default, not a
+  downloaded template. Link it from the checkout page so it's visible
+  *before* the customer pays, and make sure the text matches what your
+  billing code actually does.
+- **Explanation:** In a dispute, the processor and the card network ask what
+  the customer agreed to. If you can't produce a refund policy the customer
+  saw before paying, you lose — reliably, and not because of a bug. That's
+  how the system is designed: absent evidence of disclosed terms, the network
+  resolves ambiguity for the cardholder. A policy that exists but contradicts
+  your code is just as bad: if it promises 30-day refunds and your app refuses
+  them at day 20, the screenshot you submit as evidence becomes evidence
+  against you. The policy, the checkout page, the ToS, and the refund
+  endpoint all have to say the same thing.
+- **Applies to:** Every product taking card payments — subscriptions,
+  one-time purchases, credits (§13.2), marketplaces. Stacks: Stripe Checkout
+  (`custom_text.terms_of_service_acceptance`, and the Consent Collection
+  setting that records agreement), your own checkout form with a required
+  checkbox, plus a public `/refund-policy` URL. The URL goes in Stripe's
+  dispute evidence as `refund_policy` and `refund_policy_disclosure`.
+- **Example:**
+  ```
+  What the policy must state, specifically (vague = unusable as evidence):
+
+    [ ] Refund window in days, counted from what event (purchase? delivery?
+        first use?) — "reasonable time" is not a term
+    [ ] What IS refundable and what is NOT (used credits? partial months?
+        setup fees? annual plans after use?)
+    [ ] Prorating rules for mid-cycle cancellation — state it plainly
+    [ ] How to request one (email? in-app button? both?) and your
+        response-time commitment
+    [ ] What happens to their DATA on refund (ties to §6.1 and §15.3)
+    [ ] Free-trial terms: exact charge date, how to cancel before it
+    [ ] Effective date and a changelog — you need to prove WHICH version
+        the customer saw on the day they paid
+  ```
+  ```typescript
+  // Capture consent as a timestamped record — this IS your evidence later.
+  await db.consentLog.create({ data: {
+    userId, kind: 'refund_policy',
+    policyVersion: REFUND_POLICY_VERSION,      // e.g. '2026-07-30'
+    policyUrl: 'https://app.example.com/refund-policy',
+    acceptedAt: new Date(),
+    ipAddress, userAgent,
+  }});   // append-only, same pattern as §9.4
+
+  // Stripe Checkout: force the terms in front of them before payment
+  const session = await stripe.checkout.sessions.create({
+    consent_collection: { terms_of_service: 'required' },
+    custom_text: { terms_of_service_acceptance: { message:
+      'I agree to the [Terms](https://…/terms) and [Refund Policy](https://…/refund-policy).' }},
+    // …
+  });
+  ```
+  ```
+  The consistency audit — run it once, then on every pricing change:
+
+    Published refund policy   ─┐
+    Terms of Service          ─┤
+    Checkout page copy        ─┼─ do all five say the SAME thing?
+    Marketing/pricing page    ─┤
+    What refundOrder() does   ─┘
+
+  Any mismatch is a dispute you will lose. The most common one: marketing
+  says "cancel anytime, no questions asked" while the code enforces a
+  30-day notice period. Pick one, fix the other.
+  ```
+
+### 16.2 Alert on your dispute rate before the processor acts on it
+- **Rule:** Monitor your dispute rate continuously and alert well below the
+  card-network thresholds. Do not wait for the processor to tell you —
+  by the time they act, the remedies available to you are much worse.
+- **Explanation:** Dispute rate climbs silently. Nothing in your dashboard
+  interrupts you at 0.4%, and the first loud signal is often a notice that
+  you're in a network monitoring program — at which point you're facing
+  fines, a rolling reserve, or termination, and your options have narrowed to
+  ones you don't like. Monitoring converts that into a problem you fix
+  yourself, early, while the fix is still "improve the billing descriptor" or
+  "refund the 12 confused customers." The gap between monitoring and reacting
+  is the gap between keeping your account and losing it. Note the arithmetic
+  trap for small volumes: at 200 transactions/month, **two** disputes puts
+  you at 1% — the thresholds bite early-stage products hardest.
+- **Applies to:** Every card-accepting business. Stacks: Stripe Radar +
+  Dashboard dispute metrics, the `charge.dispute.created` webhook, plus your
+  own §13.3 event stream so you can compute the rate per cohort, per plan,
+  per traffic source. Alerting via §14.5's channels.
+- **Example:**
+  ```
+  Thresholds to alert on (indicative — verify current network programs):
+
+    Dispute rate       Status                    Your action
+    ─────────────────  ────────────────────────  ────────────────────────
+    < 0.30%            Healthy                   Weekly digest only
+    0.30% – 0.50%      Watch                     Slack notify, investigate
+                                                 reasons this week
+    0.50% – 0.75%      Warning                   PAGE. Root-cause now.
+    0.75% – 0.90%      Processor may intervene   Emergency: pause risky
+                                                 acquisition, refund
+                                                 proactively (§16.4)
+    > 0.90% or 100+    Network monitoring        Fines, reserves, possible
+    disputes/month     programs (VDMP/ECM)       termination
+
+  Alert on the TREND, not just the level:
+    · Rate doubled week over week, even if still under 0.3%
+    · Any single dispute REASON exceeding 40% of your disputes
+      → that's one fixable bug, not a fraud problem
+    · Disputes clustered in one plan, one campaign, or one country
+    · First dispute EVER from a customer segment you just started serving
+  ```
+  ```sql
+  -- Dispute rate, computed the way the networks compute it:
+  -- disputes this month ÷ transactions this month
+  SELECT
+    date_trunc('month', occurred_at)                       AS month,
+    COUNT(*) FILTER (WHERE action = 'charge.succeeded')    AS charges,
+    COUNT(*) FILTER (WHERE action = 'dispute.created')     AS disputes,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE action = 'dispute.created')
+                / NULLIF(COUNT(*) FILTER (WHERE action = 'charge.succeeded'),0)
+          , 3)                                             AS dispute_rate_pct
+  FROM billing_events
+  WHERE occurred_at > NOW() - INTERVAL '6 months'
+  GROUP BY 1 ORDER BY 1 DESC;
+
+  -- And the query that tells you WHY (fix the top reason first)
+  SELECT metadata->>'reason' AS reason, COUNT(*),
+         ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct
+  FROM billing_events
+  WHERE action = 'dispute.created' AND occurred_at > NOW() - INTERVAL '90 days'
+  GROUP BY 1 ORDER BY 2 DESC;
+  -- 'fraudulent' dominating → descriptor problem or real card fraud
+  -- 'subscription_canceled' → your cancellation flow is broken (§15.3)
+  -- 'product_not_received' → delivery/provisioning bug
+  -- 'duplicate' → idempotency bug (§12.4, §13.4)
+  ```
+
+### 16.3 Build the dispute response workflow before the first dispute
+- **Rule:** When a chargeback lands you have **days**, not weeks, to submit
+  evidence. Build the response template and automated evidence collection now,
+  while nothing is on fire. Check the actual deadline on the dispute object —
+  don't assume.
+- **Explanation:** The evidence you need — transaction logs, delivery or
+  access confirmation, the policy the customer accepted, your support
+  correspondence — is scattered across four systems, and assembling it under
+  a deadline while panicking produces a weak submission. Preassembling it
+  turns a dispute into a form you fill in. This is also the moment every
+  earlier rule pays off: §9.4's audit log proves what the account did,
+  §13.3's event stream proves what they used, §16.1's consent log proves what
+  they agreed to, §14.4's logs prove when. If you skipped those, there's
+  nothing to submit — which is why disputes are where missing receipts finally
+  cost real money.
+- **Applies to:** Every card-accepting business. Stacks: Stripe's dispute
+  evidence API (`stripe.disputes.update` with the `evidence` object) — the
+  field names below are Stripe's, and each maps to something you should
+  already be storing. Deadline lives on `dispute.evidence_details.due_by`.
+- **Example:**
+  ```typescript
+  // Webhook: assemble evidence automatically the moment a dispute arrives.
+  case 'charge.dispute.created': {
+    const dispute = event.data.object;
+    const charge  = await stripe.charges.retrieve(dispute.charge as string);
+    const user    = await findUserByCharge(charge);
+
+    await stripe.disputes.update(dispute.id, { evidence: {
+      // WHO they are and that they agreed
+      customer_name:            user.name,
+      customer_email_address:   user.email,
+      customer_purchase_ip:     user.signupIp,
+      billing_address:          formatAddress(charge.billing_details.address),
+
+      // WHAT they agreed to — §16.1's consent log
+      refund_policy:            await uploadFile(REFUND_POLICY_PDF),
+      refund_policy_disclosure: await consentNarrative(user.id),
+        // "Customer accepted refund policy v2026-07-30 at checkout on
+        //  2026-07-14 14:22 UTC from IP 203.0.113.5 (logged)."
+
+      // WHAT they received — §13.3's usage events
+      service_documentation:    await uploadFile(await usageReportPdf(user.id)),
+      access_activity_log:      await accessNarrative(user.id),
+        // "Account active 47 days. 312 logins. 1,840 AI generations,
+        //  most recent 2026-07-28 — 3 days before this dispute."
+
+      // WHAT you told them — §15.2's emails, support threads
+      customer_communication:   await uploadFile(await supportThreadPdf(user.id)),
+      receipt:                  await uploadFile(await receiptPdf(charge.id)),
+
+      uncategorized_text:       await buildNarrative(dispute, user),
+    }});
+
+    await alertTeam({ severity: 'high', dispute: dispute.id,
+      dueBy: new Date(dispute.evidence_details.due_by * 1000) });  // ← the DEADLINE
+    await audit({ action: 'dispute.created', targetId: dispute.id,
+                  actorType: 'system', metadata: { reason: dispute.reason } });
+  }
+  ```
+  ```
+  The evidence pack — what to have ready for EVERY transaction:
+
+  IDENTITY      Name, email, billing address, signup IP, signup date
+  AGREEMENT     Refund policy + ToS version accepted, timestamp, IP (§16.1)
+  DELIVERY      For SaaS: login history, feature usage, API calls (§13.3)
+                For goods: tracking number, delivery confirmation, signature
+  COMMUNICATION Every support message, every dunning email sent (§15.2),
+                every receipt — with send timestamps and delivery status
+  TRANSACTION   Amount, date, descriptor shown on their statement,
+                the exact product purchased
+  POLICY PROOF  Screenshot of the checkout page AS IT LOOKED that day,
+                showing the policy link above the pay button
+
+  The narrative that wins: chronological, factual, unemotional.
+    "Customer created an account on May 3, accepted the refund policy
+     (v2026-04-01) at checkout on May 3 at 14:22 UTC, and used the
+     service on 47 distinct days, most recently July 28 — three days
+     before filing this dispute. No refund request was received through
+     any support channel. Evidence attached: usage log, consent record,
+     receipt, and the refund policy as displayed on May 3."
+
+  Deadlines: check `evidence_details.due_by` on the dispute object. It is
+  set by the card network and varies by network and reason code — do not
+  hardcode an assumption. Submit at least 48 hours early; you cannot
+  amend after submitting, and you cannot extend.
+  ```
+
+### 16.4 Prevent disputes upstream — most of them are not fraud
+- **Rule:** Fix the causes before fighting the symptoms. Set a recognizable
+  billing descriptor, email a receipt on every charge, make cancellation
+  trivially easy, and refund proactively when a customer is clearly confused.
+  A refund costs less than a dispute, always.
+- **Explanation:** The largest share of disputes filed as "fraudulent" aren't
+  fraud — they're **"I don't recognize this charge."** The customer sees an
+  unfamiliar name on their statement, doesn't connect it to your product, and
+  calls the bank because that's faster than emailing you. That's fixable with
+  a descriptor and a receipt. The second-largest cause is a cancellation flow
+  the customer couldn't find, so they used the only cancel button that always
+  works: their bank. And the economics are lopsided — a dispute costs you the
+  transaction *plus* a non-refundable fee (typically ~$15) *plus* a mark
+  against your rate even if you win, while a refund costs you only the
+  transaction. Refunding a confused customer is the cheaper outcome every
+  single time.
+- **Applies to:** Every card-accepting business, especially subscriptions
+  (recurring charges get disputed far more than one-time ones) and free
+  trials converting to paid. Stacks: Stripe `statement_descriptor` and
+  `statement_descriptor_suffix`, receipt emails (Stripe's built-in or your
+  own), Stripe Radar rules, plus §15's dunning so lapses don't turn into
+  surprise charges.
+- **Example:**
+  ```
+  Cause → fix, ordered by how many disputes it eliminates:
+
+  "I don't recognize this charge"  (the #1 cause, and the easiest fix)
+    → statement_descriptor = the name they know you by, not your LLC.
+      "ACME-APP.COM" beats "AC HOLDINGS LLC 4402". Include a suffix
+      identifying the product when you sell several.
+    → Email a receipt on EVERY charge, immediately, with your support
+      address and the descriptor text: "This will appear on your
+      statement as ACME-APP.COM."
+    → Renewal reminder 3–7 days BEFORE annual renewals. Non-negotiable
+      for annual plans — a surprise $499 charge is a guaranteed dispute.
+
+  "I couldn't cancel"
+    → One-click cancellation, in-app, no email-us-to-cancel, no chat
+      gate, no retention maze. (In several jurisdictions the law now
+      requires cancellation be as easy as signup — check yours.)
+    → Confirm cancellation by email immediately so they have proof.
+    → Never charge after a cancellation request, even if it arrives
+      mid-cycle and the paperwork says you could.
+
+  "Product not received / not as described"
+    → Provision access instantly on payment; alert on any charge with
+      no matching provisioning event within 5 minutes (§14.2's pattern)
+    → Set expectations in the checkout copy, not in fine print
+
+  "Duplicate charge"
+    → Idempotency keys (§12.4, §13.4). A double charge from your own
+      retry logic is a dispute you caused and cannot win.
+
+  Proactive refund policy — write the trigger down and follow it:
+    · Customer emails "what is this charge?" → refund first, explain
+      second, ask if they want to stay
+    · Zero usage in the billing period on an auto-renewal → offer a
+      refund before they think to ask
+    · Any dispute you'd probably lose → accept it early rather than
+      contest; contesting and losing costs more and hurts your rate
+
+  The math, for one $50 charge:
+    Refund             = -$50            (and the customer may return)
+    Lost dispute       = -$50 -$15 fee   (and a mark on your rate)
+    WON dispute        = $0 -$15 fee     (and STILL a mark on your rate,
+                                          plus your time assembling it)
+  ```
+
+### 16.5 Never let your operating cash live inside the payment processor
+- **Rule:** Sweep funds to a business bank account on a schedule, keep an
+  operating buffer outside the processor, and know what a payout pause would
+  do to you. Assume a review can freeze payouts with no notice.
+- **Explanation:** This is what makes the opening scenario genuinely
+  dangerous. Processors can pause payouts, impose a rolling reserve (holding
+  a percentage of revenue for months), or terminate an account during a risk
+  review — triggered by a dispute-rate spike, a sudden volume change, or a
+  fraud signal. If your rent, servers, and payroll are all funded by
+  next week's payout, a routine review becomes an existential event. Holding a
+  buffer outside the processor doesn't prevent the review; it turns it from a
+  crisis into an inconvenience while you work it out. This is also the §10.3
+  point in a different costume: your processor's obligations to you are
+  defined by their agreement, and reading it *before* you need it is the
+  entire strategy.
+- **Applies to:** Any business whose revenue flows through Stripe, PayPal,
+  Square, Lemon Squeezy, Paddle, or an app-store payout. Sharpest for
+  single-processor setups, which is nearly everyone early on. Stacks:
+  automated payout schedule + treasury sweep, and §14.5 alerting on payout
+  status webhooks.
+- **Example:**
+  ```
+  The resilience checklist:
+
+  [ ] Payouts scheduled daily or every 2 days — not weekly, not manual.
+      Money in your bank cannot be frozen by your processor.
+  [ ] Operating buffer OUTSIDE the processor covering 2–3 months of
+      fixed costs (servers, salaries, rent). This is the whole rule.
+  [ ] You have read your processor's agreement on reserves, payout
+      holds, and termination (§10.3). Know the actual terms, not the
+      vibe.
+  [ ] Alert on payout webhooks: `payout.failed`, `payout.paused`, any
+      account-status change → these should reach your phone (§14.5)
+  [ ] Your customer/subscription data is exportable and portable —
+      you could migrate processors in days, not months
+  [ ] A second processor is at least evaluated (not necessarily live).
+      Know what switching would take BEFORE you need to switch.
+  [ ] Non-card payment path exists for high-value customers — invoice
+      + bank transfer for enterprise deals (§5.3) removes them from
+      card-dispute risk entirely
+  [ ] Revenue concentration is known: if one customer is >20% of MRR,
+      a single dispute from them is a business event, not a ticket
+
+  If a payout hold happens anyway:
+    1. Respond to the risk review IMMEDIATELY and completely — the
+       evidence pack from §16.3 is what they're asking for
+    2. Do not open a second account to route around it. That is a
+       terms violation and turns a hold into a permanent ban.
+    3. Communicate with customers about service continuity BEFORE
+       they notice something wrong
+    4. Your §16.2 dispute-rate data is your argument: show the trend,
+       the root cause you identified, and the fix you shipped
+  ```
+
+---
+
+## 17. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
