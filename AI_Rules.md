@@ -2743,7 +2743,408 @@ afternoon of work instead of a forensic project.
 
 ---
 
-## 14. Meta
+## 14. Observability — Error Tracking & Logs
+
+*(Source: "layer 12 of 13" in a production-readiness series.)*
+
+The layer that tells you what's broken **before your users do**. If your only
+debugging strategy is refreshing the page, your app isn't in production —
+it's a shiny demo.
+
+The failure mode is quiet by design: a user hits an error, sees a white
+screen, and leaves. They don't file a bug report. They don't email you. They
+just go. And you conclude everything is fine, because nobody complained.
+
+The difference between a demo and a production app isn't features. It's
+observability. **If you can't see what's breaking, you can't fix it.**
+
+> Related: §9.1 and §12 make failures *survivable for the user*. This section
+> makes them *visible to you*. Both are required — a beautifully handled
+> error you never find out about is still a bug that never gets fixed.
+
+### 14.1 Deploy error tracking before launch — front-end and back-end
+- **Rule:** Wire up an error tracker on day one, on **both** sides of the
+  app. Every unhandled exception, unhandled promise rejection, and server
+  error reports automatically with a stack trace, the browser/runtime, the
+  URL, and the user context. Not "after launch" — before.
+- **Explanation:** AI doesn't write this because it isn't a feature and
+  nothing fails without it — the app runs fine in the demo either way. But
+  it's the difference between learning about a bug in **minutes** versus
+  **weeks** (or never). Front-end only is the common half-measure and it
+  misses every 500, every failed job, every webhook that silently died;
+  back-end only misses the white screens, which are the ones costing you
+  customers. The integration is genuinely ten minutes per side, which makes
+  skipping it purely a matter of nobody having said to do it.
+- **Applies to:** Every production app, including internal tools. Stacks:
+  Sentry (the default — best framework coverage), or Rollbar, Bugsnag,
+  Honeybadger, Highlight, PostHog error tracking, or your cloud's native
+  option (CloudWatch, Google Error Reporting). Framework SDKs exist for
+  Next.js, React, Vue, Svelte, Express, FastAPI, Django, Rails, Laravel,
+  React Native, Flutter — use the official SDK rather than hand-rolling.
+- **Example:**
+  ```typescript
+  // sentry.client.config.ts — front-end
+  Sentry.init({
+    dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,   // DSN is public by design
+    environment: process.env.NEXT_PUBLIC_APP_ENV,   // dev/staging/prod (§9.2)
+    release: process.env.NEXT_PUBLIC_COMMIT_SHA,    // ties errors to a deploy
+    tracesSampleRate: 0.1,                     // 10% perf traces
+    replaysOnErrorSampleRate: 1.0,             // session replay on errors only
+    beforeSend: scrubPii,                      // ← REQUIRED, see §14.6
+  });
+
+  // sentry.server.config.ts — back-end. Same release + environment values,
+  // so a front-end error and the 500 that caused it group into one story.
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.APP_ENV,
+    release: process.env.COMMIT_SHA,
+    tracesSampleRate: 0.1,
+    beforeSend: scrubPii,
+  });
+  ```
+  ```
+  Coverage checklist — all of these must report, not just page loads:
+
+  FRONT-END   [ ] Unhandled exceptions and promise rejections
+              [ ] React/Vue error boundaries forward to the tracker (§12.2)
+              [ ] Failed fetches classified as errors, not swallowed
+              [ ] Source maps uploaded (§14.3) or stacks are unreadable
+
+  BACK-END    [ ] Unhandled route errors (error middleware reports, §12.1)
+              [ ] Background jobs and queue workers      ← most-missed
+              [ ] Cron/scheduled tasks                   ← second most-missed
+              [ ] Webhook handlers (inbound AND outbound)
+              [ ] Database connection and migration failures
+              [ ] Serverless function crashes and TIMEOUTS
+
+  A job that dies silently at 3am is invisible without this. Ask yourself:
+  "if my nightly reconciliation job (§13.4) never ran tonight, how would
+   I find out?" If the answer isn't "an alert," it isn't covered.
+  ```
+
+### 14.2 Silence is not health — assume the errors you can't see are the expensive ones
+- **Rule:** Never treat "no complaints" as evidence that nothing is broken.
+  Instrument the silent exits: track error *rates* alongside conversion and
+  drop-off, and investigate any funnel step where users vanish without a
+  corresponding success event.
+- **Explanation:** Only a small fraction of users report bugs — the rest just
+  leave, and the ones who leave silently are usually the ones who hit the
+  worst failure, because a broken checkout produces no support ticket, just
+  no revenue. This inverts the intuition you'd otherwise operate on: an
+  absence of complaints is an absence of *signal*, not an absence of
+  problems. The fix is comparing intent to outcome — if 100 people clicked
+  "Pay" and 60 orders exist, the missing 40 are your highest-value bug
+  report, and nobody will ever send it to you.
+- **Applies to:** Every user-facing flow, especially signup, checkout,
+  onboarding, and file upload. Stacks: your error tracker paired with product
+  analytics (PostHog, Mixpanel, Amplitude) or just your own §13.3 event
+  stream — you already have the table. Session replay (Sentry Replay,
+  PostHog, LogRocket) turns a rate into a watchable recording of what
+  actually happened.
+- **Example:**
+  ```typescript
+  // Emit intent and outcome as paired events, so the gap is measurable.
+  track('checkout.attempted', { cartId, amount });      // intent
+  const res = await checkout(cart);
+  res.ok ? track('checkout.succeeded', { cartId, orderId: res.id })
+         : track('checkout.failed',    { cartId, kind: res.kind }); // §12.1
+  ```
+  ```sql
+  -- The query that finds bugs nobody reported
+  SELECT
+    COUNT(*) FILTER (WHERE action = 'checkout.attempted') AS attempted,
+    COUNT(*) FILTER (WHERE action = 'checkout.succeeded') AS succeeded,
+    COUNT(*) FILTER (WHERE action = 'checkout.failed')    AS failed,
+    COUNT(*) FILTER (WHERE action = 'checkout.attempted')
+      - COUNT(*) FILTER (WHERE action IN ('checkout.succeeded','checkout.failed'))
+      AS vanished          -- ← attempted, never resolved either way.
+                           --   These are your white screens. Investigate first.
+  FROM usage_events
+  WHERE occurred_at > NOW() - INTERVAL '24 hours';
+  ```
+  ```
+  Signals that something is broken even with zero complaints:
+
+    · A funnel step's drop-off changes without a release explaining it
+    · "Attempted" events with no matching success OR failure event
+    · Error rate rising while support volume stays flat
+      (users are leaving instead of writing to you)
+    · One browser/OS/region converting far below the others
+      → almost always a real bug, not a preference
+    · Retry counts climbing (§12.3) — a dependency is degrading
+    · A background job's success count quietly dropping to zero
+
+  Baseline to establish in week one: your normal error rate. You cannot
+  detect "elevated" without knowing "normal."
+  ```
+
+### 14.3 Make every error actionable — source maps, releases, user context, breadcrumbs
+- **Rule:** An error report you can't act on is noise. Upload source maps,
+  tag every event with the release SHA and environment, attach user and
+  request context, and record breadcrumbs. Include the same reference ID the
+  user sees in the UI (§12.1) so a support message maps to one exact event.
+- **Explanation:** Raw production stack traces are minified garbage —
+  `a.b is not a function` at `chunk-4f2a.js:1:88213` tells you nothing, so
+  the tracker gets ignored and then abandoned. The four additions above turn
+  each event into a diagnosis: source maps say *which line*, the release tag
+  says *which deploy introduced it* (and lets you bisect against the previous
+  one), user context says *who and how many*, and breadcrumbs say *what they
+  did just before*. The reference ID closes the loop from the other
+  direction — a customer quotes "reference 8f3a…" and you're looking at their
+  exact stack trace instead of asking them to reproduce it.
+- **Applies to:** Every error tracker deployment. Stacks: Sentry CLI /
+  webpack/vite plugins for source-map upload (do it in CI, and set
+  `hidden: true` so maps aren't publicly served), `SENTRY_RELEASE` from your
+  commit SHA, `Sentry.setUser()` after auth, `Sentry.addBreadcrumb()` on
+  meaningful actions.
+- **Example:**
+  ```typescript
+  // 1. Source maps — upload in CI, don't ship them to browsers
+  //    next.config.js
+  module.exports = withSentryConfig(config, {
+    silent: true,
+    widenClientFileUpload: true,
+    hideSourceMaps: true,        // uploaded to Sentry, not served publicly
+  });
+
+  // 2. User context — set after auth, cleared on logout
+  Sentry.setUser({ id: user.id, email: user.email });   // see §14.6 re: email
+  Sentry.setTag('plan', user.plan);          // filter errors by tier —
+                                             // paying customers first
+  Sentry.setTag('account_id', user.accountId);
+
+  // 3. Breadcrumbs — the trail of what happened before the crash
+  Sentry.addBreadcrumb({ category: 'checkout', level: 'info',
+    message: 'cart.updated', data: { itemCount: cart.items.length } });
+
+  // 4. The reference ID the user sees IS the event ID
+  const eventId = Sentry.captureException(err, {
+    contexts: { request: { requestId, url, method } },
+  });
+  return { error: { message: 'Something broke on our end.', reference: eventId } };
+  //                                                        ↑ shown in §12.1's
+  //                                                          ErrorState
+  ```
+  ```
+  The triage test — can you answer these from ONE error report?
+
+  [ ] Which line of MY source (not minified output)?
+  [ ] Which release introduced it? Did it exist before the last deploy?
+  [ ] How many users hit it, and are any of them paying?
+  [ ] What did the user do in the 30 seconds before it?
+  [ ] Which browser / OS / device / region?
+  [ ] What was the request payload (scrubbed — §14.6)?
+  [ ] Is it still happening right now, or did the last deploy fix it?
+
+  If you can't answer all seven, the setup isn't finished — and you'll
+  stop opening the dashboard within two weeks.
+  ```
+
+### 14.4 Log structurally, with one correlation ID across the whole stack
+- **Rule:** Emit JSON logs with consistent fields, not `console.log` strings.
+  Generate a request/correlation ID at the edge and propagate it through every
+  log line, error report, and downstream call. Never log secrets or full
+  request bodies.
+- **Explanation:** Errors tell you *something broke*; logs tell you *what
+  led there*, and they're only useful if you can filter them. Unstructured
+  strings force grep archaeology across services; structured fields let you
+  ask "every line for request `abc-123`, in order" and read the incident like
+  a story. The correlation ID is the thread that makes it possible — without
+  it, a front-end error, the API 500 behind it, and the failed database query
+  under that are three unconnected events in three systems. With it, they're
+  one trace, and it's the same ID the user is quoting from their error
+  message (§12.1, §14.3).
+- **Applies to:** Every server, worker, and job. Stacks: `pino` or `winston`
+  (Node), `structlog` (Python), `zerolog`/`slog` (Go), `semantic_logger`
+  (Ruby). Sinks: your host's log drain, Datadog, Better Stack, Axiom,
+  Grafana Loki, CloudWatch. OpenTelemetry if you want traces alongside logs.
+- **Example:**
+  ```typescript
+  // Generate at the edge, propagate everywhere
+  app.use((req, res, next) => {
+    req.id = req.headers['x-request-id'] ?? crypto.randomUUID();
+    res.setHeader('x-request-id', req.id);        // client can quote it back
+    req.log = logger.child({ requestId: req.id, userId: req.user?.id });
+    Sentry.setTag('request_id', req.id);          // ← ties logs ↔ errors
+    next();
+  });
+
+  // Structured, queryable, consistent
+  req.log.info({ event: 'checkout.started', cartId, amount });
+  req.log.warn({ event: 'stripe.retry', attempt: 2, backoffMs: 2000 });  // §12.3
+  req.log.error({ event: 'checkout.failed', kind: 'card_declined',
+                  declineCode: err.decline_code });
+
+  // Pass the ID onward so downstream services join the same trace
+  await fetch(internalUrl, { headers: { 'x-request-id': req.id } });
+  ```
+  ```
+  Log levels — use them consistently or they stop meaning anything:
+
+  ERROR  Something broke that needs a human. Pages/alerts fire from here.
+         A handled card decline is NOT an error — it's expected business
+         behavior. Log it at info. (Alert fatigue starts here, §14.5.)
+  WARN   Degraded but recovered: a retry succeeded, a fallback was used,
+         a deprecated path was hit, quota at 90%.
+  INFO   Business events worth reconstructing: signup, checkout, plan
+         change, export. Roughly what you'd want in an incident timeline.
+  DEBUG  Developer detail. Off in production, or sampled.
+
+  What NEVER goes in a log (§3.1, §14.6):
+    ✗ Passwords, tokens, API keys, session cookies, card numbers
+    ✗ Full request/response bodies (they contain all of the above)
+    ✗ Personal data beyond an ID — log userId, not name and address
+    ✗ Anything you'd be uncomfortable seeing in a third-party dashboard
+  ```
+
+### 14.5 Alert on signal, not noise — every alert needs an owner and an action
+- **Rule:** Alert on rate and impact, not on individual errors. Every alert
+  that reaches a human must be actionable, owned by someone, and linked to
+  what to do about it. An alert nobody acts on gets muted, and a muted alert
+  is worse than none.
+- **Explanation:** The first week of error tracking is a firehose, and the
+  natural response — mute everything — is how teams end up back where they
+  started while believing they're covered. The fix is thresholds tied to
+  impact: one 500 is information, a 500 rate that tripled after a deploy is
+  an event, and "checkout error rate above 5% for 5 minutes" is worth waking
+  someone. Routing matters as much as thresholds: alerts that go to a channel
+  everyone can see are alerts nobody owns. And a new-issue alert tied to a
+  release is the highest-value one you can configure, because it catches your
+  own regressions within minutes of shipping them.
+- **Applies to:** Every production deployment, solo builders included — your
+  "on-call rotation" is just you and your phone, which is exactly why the
+  alerts have to be few and real. Stacks: Sentry alert rules, Better Stack,
+  PagerDuty/Opsgenie at team scale, or a Slack/Telegram/Discord webhook for
+  a solo setup.
+- **Example:**
+  ```
+  Alerts worth configuring on day one (start here, resist adding more):
+
+  PAGE ME (wake a human)
+    · Checkout/payment error rate > 5% over 5 min      → revenue stopped
+    · API 5xx rate > 2% over 5 min                     → app is down
+    · Any error affecting > 20 users in 10 min         → broad breakage
+    · Error rate 3x baseline within 15 min of a deploy → your regression
+    · Background job hasn't succeeded in 2x its interval  ← silent killer
+    · Audit device / logging pipeline failed (§11.3)
+
+  NOTIFY (Slack, look within the day)
+    · A NEW issue type appears in the current release
+    · An issue previously marked resolved regresses
+    · Any error hitting a paying/enterprise account
+    · Credit/usage anomaly: an account 10x its own baseline (§13.4)
+    · Dependency degradation: retry counts climbing (§12.3)
+
+  DIGEST (weekly, no interruption)
+    · Top 10 issues by user count
+    · New issues introduced this week
+    · Issues resolved and errors trending down
+
+  NEVER ALERT ON
+    ✗ Individual occurrences of a known handled error
+    ✗ Card declines, validation failures, 404s — business as usual
+    ✗ Bot/scanner traffic hitting nonexistent routes
+    ✗ Anything you have muted twice already — either fix it, filter it
+      at the source, or downgrade it. Don't let it keep firing.
+  ```
+  ```
+  Every alert needs these three fields, or don't create it:
+
+    WHO OWNS IT   A person, not a team channel. Rotate deliberately.
+    WHAT IT MEANS "Checkout is failing for >5% of users" — impact in
+                  plain language, not "SentryRule#4823 triggered."
+    WHAT TO DO    A link to the runbook (§8.5 style): first check X,
+                  then Y, roll back with Z.
+
+  Then run the drill once: trigger it deliberately in staging and
+  confirm it actually reaches your phone. An alert you've never seen
+  fire is an alert you should assume is broken.
+  ```
+
+### 14.6 Scrub PII and secrets before telemetry leaves your app
+- **Rule:** Configure scrubbing before you send the first event. Strip
+  passwords, tokens, card data, and personal data from error payloads,
+  breadcrumbs, and session replays. Then add your error tracker to your
+  subprocessor list and privacy policy.
+- **Explanation:** Error trackers capture request bodies, headers, local
+  variables, and — with session replay — literally what the user typed. By
+  default that means auth tokens, card fields, and personal data flow to a
+  third party you probably haven't disclosed. Two problems follow: you've
+  extended your breach surface to a vendor (§10.3 — their liability is capped
+  at what you paid them), and you've made a processor of personal data that
+  your privacy policy doesn't name, which is the §10.4 mismatch. Scrubbing is
+  a config block written once; discovering card numbers in your Sentry
+  dashboard during a security review is not a config problem anymore.
+- **Applies to:** Every telemetry integration — error tracking, session
+  replay, analytics, log aggregation, APM. Sharpest where §6/§10 apply
+  (GDPR, HIPAA, PCI). Note that under PCI DSS, card data in your logs pulls
+  your logging vendor into scope, which is a compliance problem you do not
+  want. Stacks: Sentry `beforeSend`/`beforeBreadcrumb` + `sendDefaultPii:
+  false` + replay masking, plus redaction paths in your logger (`pino`
+  `redact`, `structlog` processors).
+- **Example:**
+  ```typescript
+  const SENSITIVE = /pass|token|secret|key|auth|cookie|card|cvv|ssn|iban/i;
+
+  function scrubPii(event: Sentry.Event): Sentry.Event | null {
+    // Drop request bodies wholesale — safer than trying to filter them
+    if (event.request) {
+      delete event.request.data;
+      delete event.request.cookies;
+      event.request.headers = omit(event.request.headers,
+        ['authorization', 'cookie', 'x-api-key']);
+    }
+    // Redact by key name anywhere in the payload
+    walk(event, (key, value, set) => {
+      if (SENSITIVE.test(key)) set('[redacted]');
+    });
+    // Minimize user identity: an ID is enough to count and contact
+    if (event.user) event.user = { id: event.user.id };   // no email/IP/name
+    return event;
+  }
+
+  Sentry.init({
+    dsn, beforeSend: scrubPii,
+    sendDefaultPii: false,                 // ← do NOT flip this on
+    integrations: [Sentry.replayIntegration({
+      maskAllText: true,                   // replay shows layout, not content
+      blockAllMedia: true,
+      mask: ['[data-sensitive]'],
+    })],
+  });
+  ```
+  ```typescript
+  // Same discipline in the logger — redact at the sink, not at each call site
+  const logger = pino({
+    redact: {
+      paths: ['req.headers.authorization', 'req.headers.cookie',
+              '*.password', '*.token', '*.apiKey', '*.card',
+              'user.email', 'user.phone'],
+      censor: '[redacted]',
+    },
+  });
+  ```
+  ```
+  Telemetry privacy checklist:
+
+  [ ] beforeSend / beforeBreadcrumb scrubbing is configured
+  [ ] sendDefaultPii is FALSE (it defaults to sending IPs and more)
+  [ ] Session replay masks all text and media by default
+  [ ] Payment and auth fields carry a mask attribute in the DOM
+  [ ] Logger redaction paths cover every sensitive field name you use
+  [ ] Telemetry data retention is set (90 days is a common default —
+      make sure it matches RETENTION_SCHEDULE.md, §6.3)
+  [ ] Error tracker appears in your subprocessor list AND privacy
+      policy data inventory (§10.4)
+  [ ] DPA signed with the vendor if you have EU users (§10.3)
+  [ ] You have actually LOOKED at 10 real events and confirmed they're
+      clean — the config is a claim; the dashboard is the evidence
+  ```
+
+---
+
+## 15. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
