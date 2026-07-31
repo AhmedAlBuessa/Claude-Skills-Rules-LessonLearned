@@ -2370,7 +2370,380 @@ retried, and freezing the UI while you do it.
 
 ---
 
-## 13. Meta
+## 13. Pricing, Credits & Usage Metering
+
+Rules for the moment your free app needs to charge money. Flat rate feels
+wrong, per-seat feels arbitrary, usage-based sounds right until you try to
+implement it. Three steps: **pick a metric that tracks customer value**,
+**abstract it behind credits**, and **build the usage event stream from day
+one.**
+
+The one-line warning that outranks the rest: **do not try to reconstruct
+billing data from application logs later.** Logs are sampled, rotated,
+unstructured, and unauditable. Build the event stream now, while it's an
+afternoon of work instead of a forensic project.
+
+### 13.1 Pick the pricing metric that scales with the customer's success
+- **Rule:** Choose the one metric that grows as the customer gets more value,
+  and price on that. Saves time → charge per user. Processes data → charge
+  per unit processed. Generates output → charge per generation. When they win
+  more, you earn more.
+- **Explanation:** Alignment is the whole game. If your price rises as your
+  customer's benefit rises, renewal is an easy decision and churn stays low —
+  the bill grows only when the value already did. Misaligned metrics do the
+  opposite: charging per seat for a tool where one power user does all the
+  work punishes them for adopting it, so they cap seats and quietly cancel.
+  The test is a sentence the customer would agree with: *"I pay more this
+  month because I got more out of it."* If you can't say that, the metric is
+  wrong.
+- **Applies to:** Every SaaS at the point of monetization. Stacks: agnostic
+  as a decision, but the metric determines the schema — per-seat needs a
+  `memberships` table, per-unit needs the event stream in §13.3. Pick before
+  you build the billing code, because changing the metric later means
+  migrating every customer's contract.
+- **Example:**
+  ```
+  Match the metric to what the product actually does:
+
+  Product type          Value driver        Charge on        Why it aligns
+  ────────────────────  ──────────────────  ───────────────  ──────────────
+  Team collaboration    Time saved/person   Per seat         More people,
+  (Slack, Linear)                                            more time saved
+  Data processing       Volume handled      Per GB / row /   More data,
+  (ETL, analytics)                          API call         more value
+  AI generation         Output produced     Per generation   More output,
+  (copy, image, code)                       / token          more ROI
+  Transactions          Money moved         % or per txn     They only pay
+  (payments, booking)                                        when they earn
+  Infrastructure        Resources used      Per compute/     Direct cost
+                                            storage unit     pass-through
+
+  ⚠ Common misalignments that cause churn:
+    · Per-seat on a tool one person operates → they never add seats
+    · Per-API-call on something your OWN retries inflate (§12.3) → you
+      bill them for your reliability problems. Never meter retries.
+    · Flat rate when costs are usage-driven → your best customer is your
+      biggest loss (an AI app on flat pricing loses money on power users)
+    · Charging for a metric the customer can't predict or control →
+      unpredictable bills are the #1 driver of usage-pricing churn
+
+  Sanity check before committing:
+    [ ] Can the customer predict roughly what they'll pay next month?
+    [ ] Does the metric go UP when they succeed, not when you have a bug?
+    [ ] Can you measure it accurately today, to the unit, without guessing?
+    [ ] Would you be comfortable showing them the raw usage log?
+  ```
+
+### 13.2 Implement a credit system to decouple price from cost
+- **Rule:** Sell credits, not raw units. A plan buys 1,000 credits/month; an
+  API call costs 1 credit, an AI generation 10, a document export 5. This
+  lets you change what an action costs without renegotiating anyone's price.
+- **Explanation:** Credits solve two problems at once. For the customer they
+  abstract complexity — one balance to understand instead of five different
+  meters with five different rates. For you they create a pricing dial that
+  is independent of the price tag: when your model provider raises rates or
+  you add an expensive new feature, you adjust the credit cost of that
+  action, and nobody's monthly bill changes shape. Raw per-unit pricing locks
+  you into your cost structure on day one, which is exactly the structure
+  most likely to change.
+- **Applies to:** AI products (variable inference costs — the clearest fit),
+  API businesses, and any product with several billable action types at
+  different underlying costs. Stacks: your own ledger table + Stripe (either
+  prepaid credit purchases, or metered subscriptions that draw down an
+  allowance). Store the ledger yourself; never treat the payment provider as
+  your source of truth for balance.
+- **Example:**
+  ```sql
+  -- Credit ledger: APPEND-ONLY. Balance is DERIVED, never a mutable column.
+  -- A mutable `users.credits` column loses updates under concurrency and
+  -- gives you no way to answer "why is my balance this number?"
+  CREATE TABLE credit_ledger (
+    id              BIGSERIAL PRIMARY KEY,
+    account_id      UUID NOT NULL,
+    delta           INTEGER NOT NULL,      -- +1000 grant, -10 spend
+    reason          TEXT NOT NULL,         -- 'monthly_grant','ai_generation',
+                                           -- 'purchase','refund','adjustment'
+    event_id        UUID UNIQUE,           -- ties to usage_events (§13.3)
+    idempotency_key TEXT UNIQUE,           -- ← makes double-charge impossible
+    metadata        JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX ON credit_ledger (account_id, created_at DESC);
+  REVOKE UPDATE, DELETE ON credit_ledger FROM app_role;   -- append-only (§9.4)
+
+  -- Balance = sum of the ledger. Always reconstructible, always explainable.
+  CREATE VIEW credit_balances AS
+    SELECT account_id, SUM(delta) AS balance
+    FROM credit_ledger GROUP BY account_id;
+  ```
+  ```typescript
+  // Pricing table lives in config, not scattered through the code, so
+  // changing a cost is a one-line change reviewed like any other.
+  export const CREDIT_COSTS = {
+    'api.call':        1,
+    'ai.generation':  10,
+    'document.export': 5,
+    'report.build':   25,
+  } as const;
+
+  // Spend: atomic check-and-debit. Never read-then-write.
+  async function spendCredits(accountId: string, action: keyof typeof CREDIT_COSTS,
+                              idempotencyKey: string) {
+    const cost = CREDIT_COSTS[action];
+    return db.$transaction(async (tx) => {
+      const [{ balance }] = await tx.$queryRaw`
+        SELECT COALESCE(SUM(delta),0) AS balance FROM credit_ledger
+        WHERE account_id = ${accountId} FOR UPDATE`;      // ← lock the rows
+      if (balance < cost) throw new InsufficientCredits(balance, cost);
+      await tx.creditLedger.create({ data: {
+        accountId, delta: -cost, reason: action, idempotencyKey,
+      }});                    // unique key → a retry (§12.4) can't double-spend
+      return balance - cost;
+    });
+  }
+  ```
+  ```
+  Credit-system decisions to make explicitly (AI will not ask):
+
+  [ ] Do unused credits roll over? (Rollover = goodwill + deferred-revenue
+      accounting. No rollover = simpler books, more "use it or lose it"
+      pressure. Pick deliberately, state it in the ToS.)
+  [ ] What happens at zero? Hard stop, or overage at a published rate?
+      Never silently fail — see the exhaustion UX below.
+  [ ] Can they buy top-up packs mid-cycle? (Usually yes — it's revenue.)
+  [ ] Do you show a live balance and a cost preview BEFORE an expensive
+      action? ("This report costs 25 credits. You have 240.")
+  [ ] Refund policy for failed actions — if a generation errors, you MUST
+      refund the credits automatically. Charging for a failure you caused
+      is the fastest way to lose trust.
+
+  Credit exhaustion is a §12 error state, not an exception:
+    · Warn at 80% and 95% consumed (email + in-app)
+    · At zero: a clear message, the current balance, and a [Buy more]
+      button — never a 500, never a silent no-op
+    · Never let a long job die halfway through with credits already spent;
+      reserve up front, settle or refund at the end
+  ```
+
+### 13.3 Build the usage event stream from day one — one source of truth
+- **Rule:** Every billable action writes an event: *who, what, when, how
+  much.* Store it in a dedicated table. Billing reads from that table.
+  Analytics reads from that same table. Never reconstruct billing data from
+  application logs after the fact.
+- **Explanation:** One table, two consumers, zero disagreement — your revenue
+  numbers and your usage numbers come from the same rows, so they can't drift
+  apart. The alternative is what happens by default: you launch free, add
+  billing six months later, and try to mine usage out of application logs.
+  That fails because logs are sampled, rotated on a retention window, changed
+  in format whenever someone edits a log line, and completely unauditable —
+  you cannot defend an invoice built from them when a customer disputes it.
+  The event stream costs one table and one insert per billable action *now*,
+  and is unbuildable retroactively for data you've already lost.
+- **Applies to:** Every product that will ever charge on usage — which is
+  most of them, so build it even while you're free. Stacks: Postgres
+  (partitioned by month once volume grows), ClickHouse/BigQuery at high
+  volume, Kafka/Kinesis if you need a real stream. Report to billing via
+  Stripe Meters (`billing.meterEvents.create`) or your provider's metered
+  API — check current docs, this API has changed more than once.
+- **Example:**
+  ```sql
+  CREATE TABLE usage_events (
+    id             UUID PRIMARY KEY,          -- client-generated, idempotent
+    account_id     UUID NOT NULL,
+    user_id        UUID,                      -- who triggered it
+    action         TEXT NOT NULL,             -- 'ai.generation'
+    quantity       INTEGER NOT NULL DEFAULT 1,
+    credits_cost   INTEGER NOT NULL,          -- what it cost at THAT time
+    unit_cost_usd  NUMERIC(12,6),             -- YOUR cost — margin per action
+    occurred_at    TIMESTAMPTZ NOT NULL,      -- when it HAPPENED
+    recorded_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- when you SAW it
+    billing_period DATE NOT NULL,             -- pre-computed, indexed
+    reported_at    TIMESTAMPTZ,               -- when pushed to Stripe (NULL = pending)
+    metadata       JSONB                      -- model used, tokens, duration
+  );
+
+  CREATE INDEX ON usage_events (account_id, billing_period);
+  CREATE INDEX ON usage_events (reported_at) WHERE reported_at IS NULL;
+  REVOKE UPDATE, DELETE ON usage_events FROM app_role;    -- append-only
+
+  -- Note occurred_at vs recorded_at: a queued job that lands late must bill
+  -- to the period it HAPPENED in, not the one you processed it in.
+  ```
+  ```typescript
+  // Record the event in the SAME transaction as the credit debit.
+  // If they can drift apart, they will — and then you can't explain a bill.
+  await db.$transaction(async (tx) => {
+    const eventId = crypto.randomUUID();
+    await tx.usageEvents.create({ data: {
+      id: eventId, accountId, userId, action: 'ai.generation',
+      quantity: 1, creditsCost: CREDIT_COSTS['ai.generation'],
+      unitCostUsd: actualProviderCost,          // ← track margin from day one
+      occurredAt: new Date(), billingPeriod: currentPeriod(),
+      metadata: { model, inputTokens, outputTokens, durationMs },
+    }});
+    await tx.creditLedger.create({ data: {
+      accountId, delta: -CREDIT_COSTS['ai.generation'],
+      reason: 'ai.generation', eventId, idempotencyKey: eventId,
+    }});
+  });
+
+  // Separate worker reports to the billing provider and marks them done.
+  // Decoupled so a Stripe outage never blocks a user action (§12.1).
+  for (const ev of await pendingEvents()) {
+    await stripe.billing.meterEvents.create({
+      event_name: 'ai_generation',
+      payload: { stripe_customer_id: ev.stripeCustomerId, value: String(ev.quantity) },
+      identifier: ev.id,          // ← idempotent: safe to retry (§12.4)
+    });
+    await markReported(ev.id);
+  }
+  ```
+  ```
+  Why the same table serves both consumers:
+
+    BILLING asks    "how many generations did account X run in July?"
+    ANALYTICS asks  "which feature drives the most usage, and by whom?"
+    FINANCE asks    "what's our gross margin per generation?"
+                    (credits_cost revenue − unit_cost_usd → margin)
+    SUPPORT asks    "why was this customer billed $340?"
+                    → SELECT * FROM usage_events WHERE account_id = …
+                      A line-item answer in one query. That's the win.
+
+  What logs CANNOT do, no matter how good your grep is:
+    ✗ Sampled — you bill for 90% of usage and eat the rest
+    ✗ Rotated — 30-day retention vs a 12-month billing dispute
+    ✗ Unstructured — format changes silently break your parser
+    ✗ Mutable/unauditable — no defense in a chargeback
+    ✗ No provenance — cannot prove WHEN you learned of the usage
+  ```
+
+### 13.4 Metering must be idempotent, immutable, and reconciled
+- **Rule:** Every usage event carries a stable ID so it can never be counted
+  twice. The events table is append-only — corrections are new compensating
+  rows, never edits. Reconcile your table against the billing provider's
+  records on a schedule, and alert on any drift.
+- **Explanation:** Billing bugs are trust bugs. Overbilling by 3% because a
+  retry double-recorded an event is not a rounding error to a customer — it's
+  a refund, a support thread, and a reason to look at a competitor.
+  Idempotent IDs make §12.3's retries safe; append-only makes every invoice
+  defensible ("here is the exact row"); reconciliation catches the silent
+  case where your table and Stripe disagree and you don't find out until a
+  customer does. This is the same append-only + idempotency pattern as §9.4
+  and §12.4, applied where it touches money directly.
+- **Applies to:** Any metered or credit-based billing. Stacks: Postgres
+  unique constraints on the event ID, Stripe `identifier` on meter events
+  (and `idempotencyKey` on charges), a nightly reconciliation job (Vercel
+  Cron / GitHub Actions / pg_cron) that diffs your totals against the
+  provider's.
+- **Example:**
+  ```typescript
+  // Corrections are COMPENSATING ENTRIES, never updates. The original row
+  // stays, so the history explains itself.
+  async function refundFailedGeneration(eventId: string, reason: string) {
+    const original = await db.usageEvents.findUniqueOrThrow({ where: { id: eventId } });
+    await db.creditLedger.create({ data: {
+      accountId: original.accountId,
+      delta: +original.creditsCost,               // give the credits back
+      reason: 'refund',
+      idempotencyKey: `refund-${eventId}`,        // one refund per event, ever
+      metadata: { originalEventId: eventId, reason },
+    }});
+    // usage_events row is NOT deleted or edited — it happened.
+  }
+  ```
+  ```sql
+  -- Nightly reconciliation: your numbers vs the provider's numbers
+  SELECT
+    account_id,
+    SUM(quantity)                    AS our_total,
+    MAX(provider_total)              AS stripe_total,
+    SUM(quantity) - MAX(provider_total) AS drift
+  FROM usage_events u
+  LEFT JOIN provider_usage_snapshot p USING (account_id, billing_period)
+  WHERE billing_period = date_trunc('month', CURRENT_DATE)
+  GROUP BY account_id
+  HAVING SUM(quantity) <> MAX(provider_total);   -- any row here = alert
+  ```
+  ```
+  The billing-integrity checklist:
+
+  [ ] Every usage event has a client-generated stable UUID
+  [ ] That UUID is the idempotency identifier sent to the billing provider
+  [ ] usage_events and credit_ledger are append-only (REVOKE UPDATE/DELETE)
+  [ ] The event write and the credit debit share ONE transaction
+  [ ] Failed actions auto-refund credits (never bill for your own errors)
+  [ ] Your OWN retries (§12.3) are never metered as customer usage
+  [ ] Nightly reconciliation job runs, and drift pages someone
+  [ ] Every invoice line traces to specific rows you could show the customer
+  [ ] Test the whole thing against Stripe test mode (§9.2) before launch
+  [ ] Usage/billing changes are logged as sensitive actions (§9.4)
+  ```
+
+### 13.5 Migrate existing free users deliberately — grandfather on purpose
+- **Rule:** When you introduce pricing to a product that has been free,
+  decide explicitly what happens to existing users, announce it well in
+  advance, and honor whatever you promised them originally. Never silently
+  convert a free account into a billable one.
+- **Explanation:** This is the situation the whole section starts from — the
+  app is free, people are using it, now it needs to charge — and it's the
+  part that gets improvised. Your early free users are your references, your
+  word-of-mouth, and the people who tolerated your bugs; a clumsy conversion
+  burns all three at once. It's also where the legal exposure sits: if you
+  said "free forever," that's a representation you have to honor or
+  explicitly buy out. And billing someone who never agreed to be billed is a
+  chargeback and a complaint, not a sale. A deliberate plan — generous
+  grandfathering, long notice, real usage data showing them what they'd pay —
+  converts a large share of them and keeps the rest as advocates.
+- **Applies to:** Any free-to-paid transition, free-tier removal, or pricing
+  increase. Stacks: this is where §13.3's event stream pays for itself — you
+  can show every user their actual past usage and the exact plan it maps to,
+  instead of asking them to guess. Also ties to §9.4 (log the plan change)
+  and §10.4 (your ToS and pricing page must match what you actually do).
+- **Example:**
+  ```
+  The free-to-paid migration plan:
+
+  T-60 days  Turn on usage tracking for EVERYONE (§13.3) — you cannot
+             price fairly without knowing real usage. Do this even if
+             pricing isn't decided yet. This is the step people skip.
+  T-45 days  Model it: run your candidate plans against actual usage.
+             How many free users exceed the new free tier? What would
+             your top 20 users pay? Adjust before announcing, not after.
+  T-30 days  Announce. Email + in-app. Include:
+               · Why (honest: "usage costs are real and we want to
+                 still be here in three years")
+               · What THEIR usage was last month, specifically
+               · Which plan that maps to, and what they'd pay
+               · What their grandfathered deal is
+               · The exact date it takes effect
+  T-14 days  Reminder. Make upgrading one click from the email.
+  T-7 days   Final reminder to anyone who hasn't chosen.
+  T-0        Enforce — but soft-land: over-limit accounts go read-only
+             for a grace period, they don't get deleted or hard-locked.
+  T+30 days  Follow up personally with high-usage accounts that churned.
+             That conversation is your best pricing feedback.
+
+  Grandfathering options — pick one and say it plainly:
+    · Free forever at current usage      (most generous; do this if you
+                                          ever said "free forever")
+    · Free tier with a usage cap         (most common; cap above what
+                                          most existing users actually use)
+    · Discounted legacy plan for 12mo    (softens the landing, has an end)
+    · Full price after a grace period    (only if you never promised
+                                          otherwise — expect churn)
+
+  Never do:
+    ✗ Auto-charge a card on file that was collected for something else
+    ✗ Shorten the notice period because revenue is needed now
+    ✗ Delete or lock data on day one — read-only access preserves the
+      relationship and the option to come back (§6 still governs the data)
+    ✗ Change the terms without updating the ToS and privacy policy (§10.4)
+  ```
+
+---
+
+## 14. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
