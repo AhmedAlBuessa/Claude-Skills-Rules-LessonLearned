@@ -3144,7 +3144,391 @@ observability. **If you can't see what's breaking, you can't fix it.**
 
 ---
 
-## 15. Meta
+## 15. Dunning — Recovering Failed Payments
+
+Rules for the revenue leaving through the back door. Right now a customer's
+card expires, the charge fails, and your app does **nothing** — no retry, no
+notification, no email. The subscription dies silently and the customer never
+finds out. They didn't churn; they were dropped.
+
+This is called **dunning**, and most builders don't know the word exists
+while it quietly bleeds their MRR.
+
+Three things close it: **a retry schedule that fights for the payment**, **an
+email sequence that tells the customer**, and **a grace period before
+cancellation**. Your AI built the front door to your revenue. It never
+noticed customers walking out the back.
+
+> **Involuntary churn** — customers lost to payment failure rather than
+> choice — is the term for this. It's typically a large share of total churn
+> and it's the cheapest kind to fix, because those customers still want your
+> product. Recovery-rate figures cited below (~30–40% from email alone) are
+> indicative industry ranges; measure your own (§15.5).
+
+### 15.1 A failed charge is a recoverable event, not a final answer
+- **Rule:** Never treat the first decline as the end. Configure a staggered
+  retry schedule across 7–14 days. Your billing provider supports this
+  natively — turn it on, and handle the webhooks yourself so your app state
+  follows along.
+- **Explanation:** Most declines are temporary: a card hit its limit two days
+  before payday, the bank flagged one transaction, the card expired and a
+  reissued one is already in the customer's wallet. A single attempt catches
+  none of that, but attempts spread across two weeks catch a lot of it,
+  because the underlying condition usually resolves on its own. The spacing
+  is the whole point — retrying three times in an hour just gets you three
+  declines and, if you keep doing it, a card-testing flag on your account
+  (§12.4). Your AI won't configure this because it treats a failed charge as
+  a terminal error, which is exactly the wrong mental model.
+- **Applies to:** Every subscription or recurring-payment product. Stacks:
+  Stripe Billing (Smart Retries / configurable retry schedule under Billing →
+  Revenue Recovery), Paddle, Chargebee, Recurly, Lemon Squeezy — all have
+  native dunning. Use the provider's retry engine rather than writing your
+  own cron; you want their decline-code intelligence and their rate limits.
+- **Example:**
+  ```
+  A staggered schedule that actually works (Stripe default is similar —
+  either use Smart Retries or set this explicitly):
+
+    Day 0   Initial charge fails            → mark past_due, send Email 1
+    Day 1   Retry #1   (catches temporary holds, momentary limits)
+    Day 3   Retry #2   → send Email 2 if it fails
+    Day 5   Retry #3   (spans a weekend — many limits reset)
+    Day 7   Retry #4   → send Email 3 (final notice)
+    Day 10  Retry #5   (catches reissued cards arriving in the mail)
+    Day 14  Final retry → if it fails, END the grace period (§15.3)
+
+  Why the spread matters:
+    · Payday cycles are ~14 days apart — a 2-week window crosses one
+    · A reissued physical card takes 7–10 days to arrive
+    · Bank fraud holds usually clear in 24–72 hours
+    · Retrying hourly catches none of these and risks a card-testing flag
+  ```
+  ```typescript
+  // Handle the webhooks so YOUR state follows the provider's retries.
+  // Webhook handlers must be idempotent — providers redeliver (§12.4).
+  export async function POST(req: Request) {
+    const event = stripe.webhooks.constructEvent(
+      await req.text(),
+      req.headers.get('stripe-signature')!,
+      process.env.STRIPE_WEBHOOK_SECRET!,     // ALWAYS verify (§8.2)
+    );
+
+    // Idempotency: one row per provider event id, ever.
+    if (await alreadyProcessed(event.id)) return new Response(null, { status: 200 });
+
+    switch (event.type) {
+      case 'invoice.payment_failed': {
+        const invoice = event.data.object;
+        const attempt = invoice.attempt_count;
+        await markPastDue(invoice.subscription, {
+          attempt,
+          nextAttemptAt: invoice.next_payment_attempt,   // null = retries done
+          declineCode: invoice.last_finalization_error?.code,
+        });
+        await sendDunningEmail(invoice, attempt);        // §15.2
+        await audit({ action: 'payment.failed', targetId: invoice.subscription,
+                      actorType: 'system', metadata: { attempt } });  // §9.4
+        break;
+      }
+      case 'invoice.payment_succeeded':
+        await restoreToActive(event.data.object.subscription);  // recovered!
+        await cancelPendingDunningEmails(event.data.object.subscription);
+        break;                                  // ↑ critical: stop the emails
+
+      case 'customer.subscription.deleted':
+        await endGracePeriod(event.data.object.id);       // §15.3
+        break;
+    }
+    await markProcessed(event.id);
+    return new Response(null, { status: 200 });
+  }
+  ```
+
+### 15.2 Tell the customer — build the failed-payment email sequence
+- **Rule:** Send a three-email sequence when a payment fails. Your customer is
+  not ignoring you; they have no idea anything happened. Each email states
+  plainly that the payment failed, what happens next, and gives a one-click
+  link to update the card.
+- **Explanation:** This is the single highest-ROI thing in the section —
+  email alone recovers a meaningful share of failed charges (commonly cited
+  at 30–40%) because the failure is almost never a decision. The customer's
+  card expired and they simply don't know; nobody told them. That's revenue
+  you already earned walking out because of a missing notification. The
+  emails must be specific and blame-free: no "your account is delinquent,"
+  just "your card ending in 4242 was declined — here's a link to update it."
+  And they need a deadline, because urgency without a date doesn't move
+  anyone.
+- **Applies to:** Every recurring-revenue product. Stacks: your provider's
+  built-in dunning emails are the fastest start (Stripe → Billing → Revenue
+  Recovery → customer emails) but they're generic; your own via
+  Resend/Postmark/SendGrid convert better. Pair with in-app banners — email
+  deliverability is not guaranteed, and a logged-in user seeing the message
+  is your best channel.
+- **Example:**
+  ```
+  The three-email sequence:
+
+  EMAIL 1 — Day 0, immediately on failure
+    Subject:  "Your payment didn't go through"
+    Tone:     Neutral, helpful, assume it's a mistake (it is)
+    Body:     · Card ending 4242 was declined on July 30
+              · Reason, if you have it ("your card has expired")
+              · What happens: "We'll try again on Aug 2. Your account
+                is fully active — nothing changes right now."
+              · [Update payment method] ← one click, no login friction
+    Goal:     Reassure. Most recoveries happen right here.
+
+  EMAIL 2 — Day 3, after retry #2 fails
+    Subject:  "We still can't process your payment"
+    Tone:     Slightly more direct, introduce the date
+    Body:     · We've tried twice; still declining
+              · "Your account stays active until Aug 13" ← the deadline
+              · Common fixes: expired card, new card issued, bank hold
+              · [Update payment method]  ·  [Contact us]
+    Goal:     Create a specific, dated urgency.
+
+  EMAIL 3 — Day 7, final notice
+    Subject:  "Your subscription ends Aug 13"
+    Tone:     Clear, still respectful, never punitive
+    Body:     · Final attempt on Aug 14
+              · Exactly what happens: account goes read-only, DATA IS
+                KEPT for 30 days, resubscribe anytime to restore
+              · [Update payment method]
+    Goal:     Last chance + remove the fear of losing their work.
+
+  Rules for all three:
+    · Update link works WITHOUT logging in (signed, expiring URL) —
+      login friction kills recovery
+    · Never blame the customer; the bank declined it, not them
+    · Never bury it in a newsletter template — plain, transactional
+    · STOP THE SEQUENCE the moment payment succeeds (§15.1 webhook) —
+      dunning a customer who already paid is worse than not dunning
+    · Also show it in-app: banner + a dismissible modal on next login
+    · Send from a real, monitored address — replies will come
+  ```
+  ```typescript
+  // Guard every send against the race: they may have paid 30 seconds ago.
+  async function sendDunningEmail(invoice: Stripe.Invoice, attempt: number) {
+    const sub = await getSubscription(invoice.subscription as string);
+    if (sub.status === 'active') return;              // already recovered
+    if (await alreadySent(sub.id, attempt)) return;   // idempotent (§12.4)
+
+    const template = { 1: 'dunning_1', 2: 'dunning_2', 4: 'dunning_3' }[attempt];
+    if (!template) return;                            // silent retries between
+
+    await email.send({ to: sub.customerEmail, template, data: {
+      last4: invoice.default_payment_method?.card?.last4,
+      reason: humanDeclineReason(invoice),            // §12.1 declineMessage
+      gracePeriodEndsAt: sub.gracePeriodEndsAt,       // the DATE
+      updateUrl: signedUpdateUrl(sub.id, { expiresIn: '14d' }),  // no login
+    }});
+    await recordSent(sub.id, attempt);
+  }
+  ```
+
+### 15.3 Grace period before cancellation — never hard-cut on first failure
+- **Rule:** Define a 7–14 day window after the first failure where the account
+  stays active. Cancellation happens only after retries and emails are
+  exhausted. Even then, degrade to read-only rather than deleting — and keep
+  the data (§6).
+- **Explanation:** Instant cancellation on a declined card converts a
+  temporary banking hiccup into permanent churn, and the customer often
+  doesn't discover it until they try to log in and find their work gone —
+  at which point you've lost both the revenue and the relationship. The grace
+  period costs you a couple of weeks of service you were going to provide
+  anyway, and buys the entire retry-and-email window a chance to work. The
+  read-only landing matters just as much: a customer whose data is intact
+  resubscribes with one click, while a customer whose data was deleted is
+  gone and may well tell people why.
+- **Applies to:** Every subscription product. Stacks: Stripe's
+  `subscription.status` already models this (`past_due` → `canceled`, with
+  the transition configurable under Revenue Recovery) — mirror it in your own
+  schema so your app can gate features. Ties to §6.1: cancellation is not
+  deletion, and any deletion still runs through the retention engine.
+- **Example:**
+  ```
+  The subscription state machine — implement these five states explicitly:
+
+    ACTIVE ──payment fails──> PAST_DUE ──retries+emails exhausted──> GRACE
+      ▲                          │                                    │
+      │                          │ payment succeeds                   │
+      └──────────────────────────┴────────────────────────────────────┘
+                                                                      │
+                                                     grace expires    ▼
+                                                                  READ_ONLY
+                                                                      │
+                                            30 days, no reactivation  ▼
+                                                              DEACTIVATED
+                                                        (data retained per §6.3)
+
+    ACTIVE       Full access. Normal.
+    PAST_DUE     Full access. Retries running, emails sending, in-app
+                 banner visible. Day 0–14. The customer loses NOTHING yet.
+    GRACE        Full access, final warning shown prominently. Day 14–21.
+    READ_ONLY    Can log in, view and EXPORT their data, cannot create or
+                 use paid features. One-click resubscribe restores
+                 everything. Hold here for at least 30 days.
+    DEACTIVATED  No access. Data still retained per RETENTION_SCHEDULE.md
+                 (§6.3) — deactivation is NOT deletion (§6.1).
+
+  What must NEVER happen:
+    ✗ ACTIVE → DEACTIVATED on the first decline
+    ✗ Deleting data when a subscription lapses
+    ✗ Silently downgrading with no notification
+    ✗ Locking them out of EXPORTING their own data (§10.4 portability)
+  ```
+  ```typescript
+  // Gate features on state, not on a boolean `isPaid` flag.
+  const ACCESS = {
+    active:      { read: true,  write: true,  export: true,  banner: null },
+    past_due:    { read: true,  write: true,  export: true,  banner: 'payment_failed' },
+    grace:       { read: true,  write: true,  export: true,  banner: 'final_notice' },
+    read_only:   { read: true,  write: false, export: true,  banner: 'subscription_ended' },
+    deactivated: { read: false, write: false, export: false, banner: 'reactivate' },
+  } as const;
+
+  // One-click return — the whole point of holding the data
+  async function reactivate(subId: string) {
+    const sub = await getSubscription(subId);
+    await stripe.subscriptions.resume(sub.stripeId);
+    await setState(subId, 'active');
+    await audit({ action: 'subscription.reactivated', targetId: subId,
+                  actorType: 'user' });                          // §9.4
+  }
+  ```
+
+### 15.4 Prevent the failure upstream — expiring cards, account updater, pre-dunning
+- **Rule:** Don't wait for the decline. Detect cards expiring in the next 30
+  days and ask for an update before the charge runs. Enable your provider's
+  card-account-updater service so reissued cards refresh automatically.
+- **Explanation:** The cheapest failed payment is the one that never happens.
+  A meaningful share of involuntary churn is just card expiry, and you know
+  the expiry date — it's stored on the payment method, so a scheduled job can
+  find every card expiring before the next renewal and email those customers
+  while their account is still perfectly healthy. That email converts far
+  better than a dunning email, because nothing has broken yet and there's no
+  friction of failure attached. Card account updaters go further and fix it
+  with no customer action at all: when an issuer reissues a card, the network
+  pushes the new number to your provider automatically.
+- **Applies to:** Every card-on-file subscription. Stacks: Stripe (Card
+  Account Updater is automatic for most card brands on live accounts — verify
+  it's enabled for yours), Adyen, Braintree, Recurly all offer equivalents.
+  Pair with §13.3's event stream so you can measure whether pre-dunning
+  actually moved your failure rate.
+- **Example:**
+  ```sql
+  -- Nightly job: who is about to fail, before they fail?
+  SELECT s.id, s.customer_email, pm.card_last4, pm.exp_month, pm.exp_year
+  FROM subscriptions s
+  JOIN payment_methods pm ON pm.id = s.default_payment_method_id
+  WHERE s.status = 'active'
+    AND make_date(pm.exp_year, pm.exp_month, 1) + INTERVAL '1 month'
+        < s.current_period_end        -- card expires before next renewal
+    AND NOT EXISTS (                  -- don't nag twice
+      SELECT 1 FROM notifications n
+      WHERE n.subscription_id = s.id AND n.kind = 'card_expiring'
+        AND n.sent_at > NOW() - INTERVAL '30 days');
+  ```
+  ```
+  The upstream prevention stack, cheapest first:
+
+  1. CARD ACCOUNT UPDATER          Zero customer effort. Turn it on today.
+     Issuer reissues → network pushes the new card to your provider →
+     the charge just works. Verify it's enabled; don't assume.
+
+  2. PRE-DUNNING EMAIL (T-30 days) "Your card ending 4242 expires next
+     month — update it now so your service isn't interrupted."
+     Nothing is broken yet, so this converts better than dunning does.
+
+  3. IN-APP PROMPT                 Show a persistent (dismissible) banner
+     to logged-in users with an expiring card. Higher reach than email.
+
+  4. BACKUP PAYMENT METHOD         Let customers add a second card and
+     fall back to it automatically. Standard for annual/high-value plans.
+
+  5. RETRY TIMING INTELLIGENCE     Charge on a day likely to succeed —
+     avoid the 29th–31st (short months) and prefer weekdays.
+
+  6. SMART DECLINE ROUTING         Some declines are `do_not_honor` (retry
+     later) and some are `stolen_card` (never retry — see §12.4). Read the
+     decline code and act differently; don't retry everything blindly.
+  ```
+
+### 15.5 Measure involuntary churn separately — you can't fix what you can't see
+- **Rule:** Track payment recovery as its own metric. Separate **involuntary
+  churn** (payment failed) from **voluntary churn** (they chose to leave).
+  Report recovery rate, revenue recovered, and where in the sequence
+  customers come back.
+- **Explanation:** Blended into one churn number, involuntary churn is
+  invisible — and it's the portion you can actually fix, because those
+  customers never decided to leave. Separating them changes what you work on:
+  voluntary churn is a product problem needing months, involuntary churn is a
+  plumbing problem needing an afternoon. The sequence-level detail tells you
+  what to tune — if most recoveries come from Email 1, your retry schedule is
+  doing little and the notification is doing everything; if recoveries cluster
+  at day 10, your grace period is exactly the right length and shortening it
+  would cost real money.
+- **Applies to:** Every subscription business. Stacks: your §13.3 usage/event
+  stream plus subscription state transitions — you already have both tables,
+  this is a query, not new infrastructure. Stripe's Revenue Recovery
+  dashboard gives a baseline; your own numbers explain *why*.
+- **Example:**
+  ```sql
+  -- Monthly dunning scorecard
+  WITH failures AS (
+    SELECT subscription_id, MIN(occurred_at) AS first_failure, amount
+    FROM billing_events
+    WHERE action = 'payment.failed'
+      AND occurred_at >= date_trunc('month', CURRENT_DATE)
+    GROUP BY subscription_id, amount
+  ),
+  outcomes AS (
+    SELECT f.*,
+      EXISTS (SELECT 1 FROM billing_events r
+              WHERE r.subscription_id = f.subscription_id
+                AND r.action = 'payment.succeeded'
+                AND r.occurred_at BETWEEN f.first_failure
+                                      AND f.first_failure + INTERVAL '14 days'
+      ) AS recovered
+    FROM failures f
+  )
+  SELECT
+    COUNT(*)                                        AS failed_payments,
+    COUNT(*) FILTER (WHERE recovered)               AS recovered_count,
+    ROUND(100.0 * COUNT(*) FILTER (WHERE recovered) / COUNT(*), 1)
+                                                    AS recovery_rate_pct,
+    SUM(amount) FILTER (WHERE recovered)     / 100.0 AS revenue_recovered,
+    SUM(amount) FILTER (WHERE NOT recovered) / 100.0 AS revenue_lost
+  FROM outcomes;
+  ```
+  ```
+  The dunning dashboard — six numbers, reviewed monthly:
+
+    1. Involuntary churn rate      subs lost to payment failure / total
+    2. Voluntary churn rate        subs cancelled by choice / total
+                                   ← if #1 is a large share of #2, this
+                                     whole section is your best ROI
+    3. Recovery rate               % of failed payments eventually paid
+    4. Revenue recovered ($)       what dunning earned you this month
+    5. Recovery by touchpoint      retry 1/2/3 · email 1/2/3 · in-app
+                                   ← tells you what to tune
+    6. Time-to-recovery            median days from failure to payment
+                                   ← tells you if the grace period fits
+
+  Alert on (§14.5):
+    · Failure rate above your baseline for 24h → provider or config issue
+    · Recovery rate dropping month over month → emails may be landing
+      in spam; check deliverability before assuming customers changed
+    · ANY subscription that went active → deactivated in under 14 days
+      → your grace period isn't working as configured. Investigate now.
+
+  Set the baseline before you optimize. "We recover 34%" is only
+  meaningful once you know last month was 21%.
+  ```
+
+---
+
+## 16. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
