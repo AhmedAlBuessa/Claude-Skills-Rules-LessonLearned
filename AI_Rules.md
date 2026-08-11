@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–21**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–22**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–21)
+### Part II — What it builds, and the business under it (5–22)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -165,8 +165,14 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [21.2 When the customer's evidence contradicts your system, escalate — never close](#212-when-the-customers-evidence-contradicts-your-system-escalate--never-close)
   - [21.3 Escalate on intent and history, not just the literal message](#213-escalate-on-intent-and-history-not-just-the-literal-message)
   - [21.4 Measure the handoff — the reopen rate tells you what the agent got wrong](#214-measure-the-handoff--the-reopen-rate-tells-you-what-the-agent-got-wrong)
+- [22. Accessibility — Real Legal Exposure, Real Fix](#22-accessibility--real-legal-exposure-real-fix)
+  — *a statement is not a defense; conformance is*
+  - [22.1 Treat WCAG 2.2 Level AA as the actual standard](#221-treat-wcag-22-level-aa-as-the-actual-standard)
+  - [22.2 Automate the checks into CI — catch regressions, not just today's bugs](#222-automate-the-checks-into-ci--catch-regressions-not-just-todays-bugs)
+  - [22.3 Test the two-thirds automation misses — keyboard and screen reader](#223-test-the-two-thirds-automation-misses--keyboard-and-screen-reader)
+  - [22.4 Publish an accessibility statement only after it's true](#224-publish-an-accessibility-statement-only-after-its-true)
 
-- [22. Meta](#22-meta)
+- [23. Meta](#23-meta)
 
 ---
 
@@ -184,6 +190,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Deciding what to test | [§19.3 the CAC math](#193-do-the-math--testing-is-a-financial-decision) |
 | Setting up a test suite | [§20](#20-test-discipline) |
 | Deploying an AI support agent | [§21](#21-where-the-ai-support-agent-stops-and-you-start) |
+| Worried about accessibility lawsuits | [§22](#22-accessibility--real-legal-exposure-real-fix) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -5181,7 +5188,216 @@ have. Build the 70% precisely so the time exists for the 30%.
 
 ---
 
-## 22. Meta
+## 22. Accessibility — Real Legal Exposure, Real Fix
+
+Web accessibility lawsuits run in the **thousands per year** in the US alone,
+and AI-generated front-ends are unusually exposed: the model produces
+`<div onClick>` instead of `<button>`, skips form labels, and picks colors for
+looks rather than contrast. So the risk is real and the exposure is genuine.
+
+> **⚠ Correction to the common advice.** You will hear that publishing an
+> **accessibility statement** is "all you need" and fixes this in one prompt.
+> That is wrong, and following it makes things worse. A statement is a page of
+> text — it does not make anything usable and it is not a legal defense.
+> Claiming you tested for disabilities when you haven't is a false public
+> representation, which is exactly the §10.4 problem: what you publish, you
+> are held to. Plaintiffs' firms read these statements; an inaccurate one is
+> evidence against you, not protection.
+>
+> The good news is that the real fix is still mostly cheap and largely
+> automatable — it's just three steps rather than one page. Do the work, then
+> publish a statement that is **true**.
+>
+> *Not legal advice. Exposure depends on jurisdiction, sector, and company
+> size — in the EU the Accessibility Act now reaches many consumer products
+> directly. Talk to a lawyer for anything binding (§10.5).*
+
+### 22.1 Treat WCAG 2.2 Level AA as the actual standard
+- **Rule:** Target WCAG 2.2 Level AA for your core user flows. That published
+  standard — not a statement page — is what regulators, procurement teams, and
+  courts reference. Fix the app first; document second.
+- **Explanation:** Nearly every accessibility law points at WCAG rather than
+  defining its own rules, so conforming to it is the thing that actually
+  reduces exposure. It's also narrower than it sounds: you don't need the
+  whole site compliant on day one, you need signup, checkout, and the primary
+  workflow to work — those are what get tested and what a user needs to
+  complete. And accessibility overlaps heavily with quality generally; the
+  same fixes improve keyboard use, mobile behavior (§19.2), and SEO.
+- **Applies to:** Every public web product. Sharper if you sell to government,
+  education, healthcare, or large enterprises (§5.3 — they'll request a VPAT),
+  or to EU consumers. Stacks: semantic HTML first, then component libraries
+  with accessibility built in (Radix, React Aria, shadcn/ui) — hand-rolled
+  dropdowns and modals are where most violations originate.
+- **Example:**
+  ```
+  The violations that produce most claims — check these first:
+
+  [ ] Images missing alt text (decorative ones need alt="")
+  [ ] Form inputs with no associated <label>
+  [ ] Text contrast below 4.5:1 (3:1 for large text)
+  [ ] Non-semantic controls: <div onClick> instead of <button>/<a>
+  [ ] Keyboard traps, or interactive elements unreachable by Tab
+  [ ] No visible focus indicator (someone removed the outline)
+  [ ] Missing page <title>, <html lang>, or heading hierarchy
+  [ ] Video without captions
+  [ ] Errors signalled by color alone ("the red field")
+  [ ] Modals that don't trap focus or close on Escape
+
+  Most of these are one-line fixes in AI-generated code, and most of
+  them come from the same root cause:
+
+    ✗ <div className="btn" onClick={submit}>Pay</div>
+    ✓ <button type="submit" onClick={submit}>Pay</button>
+
+  The semantic element gives you keyboard support, focus, screen-reader
+  role, and disabled state for free. The div gives you none of it.
+  ```
+
+### 22.2 Automate the checks into CI — catch regressions, not just today's bugs
+- **Rule:** Run automated accessibility tests on every pull request as part of
+  the §18.2 gate. Fail the build on new violations. Automated tooling catches
+  roughly a third of issues — take that third for free and permanently.
+- **Explanation:** A one-time audit fixes today and decays immediately,
+  because the next AI-generated component reintroduces the same patterns. CI
+  makes it a ratchet like coverage (§20.2): existing issues can be
+  grandfathered, but new ones can't merge. This is also the cheapest possible
+  version of the work — no expertise required, no manual pass, and it runs
+  while you sleep.
+- **Applies to:** Every web front-end. Stacks: `axe-core` via
+  `@axe-core/playwright` or `jest-axe`, `eslint-plugin-jsx-a11y` for
+  build-time catches, Lighthouse CI for page-level scores, Pa11y for
+  crawling. Add `axe` DevTools or WAVE locally for spot checks.
+- **Example:**
+  ```typescript
+  // tests/a11y.spec.ts — runs with your Playwright suite (§20.3)
+  import AxeBuilder from '@axe-core/playwright';
+
+  const FLOWS = ['/', '/signup', '/login', '/checkout', '/dashboard'];
+
+  for (const path of FLOWS) {
+    test(`${path} has no WCAG A/AA violations`, async ({ page }) => {
+      await page.goto(path);
+      const { violations } = await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa'])
+        .analyze();
+      expect(violations).toEqual([]);
+    });
+  }
+  ```
+  ```json
+  // .eslintrc — catch it before it's even committed
+  { "extends": ["plugin:jsx-a11y/recommended"] }
+  ```
+  ```
+  Add to CLAUDE.md so AI-written UI starts accessible (§9.5):
+
+    "Use semantic HTML: <button> for actions, <a href> for navigation,
+     real <label> elements bound to inputs, and one <h1> with a correct
+     heading order. Every image needs alt text. Never remove focus
+     outlines. Interactive components must work with keyboard only.
+     Color contrast must meet WCAG AA (4.5:1 body text)."
+  ```
+
+### 22.3 Test the two-thirds automation misses — keyboard and screen reader
+- **Rule:** Manually complete your core flows twice: once using only the
+  keyboard, once with a screen reader. Both are free, take about thirty
+  minutes, and find the issues no scanner reports.
+- **Explanation:** Automated tools verify markup properties, not whether a
+  human can actually finish the task — the majority of real barriers are
+  things like a focus order that jumps around, a modal you can't escape, an
+  error message that never gets announced, or alt text that says "image1.png".
+  Those all pass `axe` cleanly. The keyboard pass alone catches most of them,
+  because keyboard operability is the foundation everything else sits on: if
+  Tab can't reach it, no assistive technology can use it.
+- **Applies to:** Every core flow, re-run whenever that flow changes. Stacks:
+  no purchase needed — VoiceOver ships with macOS/iOS (⌘F5), Narrator with
+  Windows, TalkBack with Android; NVDA is free on Windows. For real
+  confidence, pay actual users with disabilities to test — it's the highest
+  signal available and it isn't expensive.
+- **Example:**
+  ```
+  THE KEYBOARD PASS (15 min) — unplug your mouse, complete signup→checkout:
+    [ ] Tab reaches every interactive element, in a sensible order
+    [ ] Focus is always VISIBLE — you never lose track of where you are
+    [ ] Enter/Space activate buttons; Escape closes modals
+    [ ] Modals trap focus while open and restore it on close
+    [ ] No trap: you can always Tab or Escape back out
+    [ ] Dropdowns and date pickers are operable with arrows
+    [ ] A "skip to main content" link exists before the nav
+
+  THE SCREEN READER PASS (15 min) — turn it on and do the same flow:
+    [ ] Every control announces what it IS and what it DOES
+        ("Pay now, button" — not "clickable div")
+    [ ] Form fields announce their label, requirement, and current error
+    [ ] Validation errors are ANNOUNCED, not just shown in red
+        (aria-live="polite" — the same mechanism as §12.5)
+    [ ] Images announce meaningful alt text, decorative ones stay silent
+    [ ] Headings describe the page structure when listed
+    [ ] Dynamic content (toasts, loading, results) is announced
+
+  If you cannot complete checkout in either pass, that is your bug list
+  — and it is the same list a plaintiff's tester would produce.
+  ```
+
+### 22.4 Publish an accessibility statement only after it's true
+- **Rule:** Once the work is done, publish a statement in your footer that
+  states your conformance target, what you've actually tested, known gaps, and
+  a real contact route for accessibility problems. Never publish claims you
+  haven't verified.
+- **Explanation:** A statement has genuine value in the right order: it shows
+  good-faith effort, gives users a way to report problems before escalating,
+  and answers the procurement question directly. What it never does is
+  substitute for the fixes — and an overclaiming statement is affirmatively
+  harmful, because "we are fully WCAG 2.2 AA compliant" on a site with
+  unlabeled inputs is a documented false claim. Honest statements say what's
+  conformant, what isn't yet, and by when. That reads as competence, and it's
+  also the only version that stays true after your next deploy.
+- **Applies to:** Every public site, after §22.1–22.3. Stacks: a static
+  `/accessibility` page linked from the footer; a VPAT (Voluntary Product
+  Accessibility Template) if you sell to government or enterprise.
+- **Example:**
+  ```markdown
+  # Accessibility Statement
+
+  Last reviewed: 2026-08-11
+
+  ## Our target
+  We aim to meet WCAG 2.2 Level AA. We test our core flows — signup,
+  login, checkout, and the main dashboard — against that standard.
+
+  ## How we test
+  · Automated axe-core checks on every code change
+  · Manual keyboard-only testing of core flows each release
+  · Screen reader testing with VoiceOver (Safari) and NVDA (Firefox)
+  · Last full manual audit: 2026-07-15
+
+  ## Known limitations          ← the section that makes it credible
+  · Our data-table sorting controls are not yet fully keyboard
+    operable. Fix expected Q4 2026.
+  · Some older help-centre videos lack captions. We are adding them.
+
+  ## Contact us
+  If you encounter a barrier, email accessibility@example.com — we
+  respond within 2 business days and will provide the information or
+  service in another format while we fix it.
+  ```
+  ```
+  Never write in a statement:
+    ✗ "Fully compliant" / "100% accessible"  — unverifiable, and false
+      the moment anything ships
+    ✗ "Tested for all disabilities"          — nobody can claim this
+    ✗ Any conformance claim you have not actually tested
+    ✗ A contact address nobody monitors      — an ignored accessibility
+      email is worse than none; it documents that you were told
+
+  And keep it current: review it whenever a core flow changes, the same
+  way RETENTION_SCHEDULE.md tracks §6.3. A statement dated three years
+  ago describes a product that no longer exists.
+  ```
+
+---
+
+## 23. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
