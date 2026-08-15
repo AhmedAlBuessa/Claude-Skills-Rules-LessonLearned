@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–26**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–27**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–26)
+### Part II — What it builds, and the business under it (5–27)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -195,8 +195,14 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [26.2 Invalidate on the event, not on a timer — and name the owner](#262-invalidate-on-the-event-not-on-a-timer--and-name-the-owner)
   - [26.3 Prevent the stampede before your biggest day](#263-prevent-the-stampede-before-your-biggest-day)
   - [26.4 Cache bugs surface as tickets, not errors — detect them deliberately](#264-cache-bugs-surface-as-tickets-not-errors--detect-them-deliberately)
+- [27. CI/CD Cost Control](#27-cicd-cost-control)
+  — *the pipeline that doesn't surprise you on day 19*
+  - [27.1 Run only what the change requires](#271-run-only-what-the-change-requires)
+  - [27.2 Cache everything reusable](#272-cache-everything-reusable)
+  - [27.3 Self-host runners only when the math and the security model both work](#273-self-host-runners-only-when-the-math-and-the-security-model-both-work)
+  - [27.4 Alert at 75%, not at 100%](#274-alert-at-75-not-at-100)
 
-- [27. Meta](#27-meta)
+- [28. Meta](#28-meta)
 
 ---
 
@@ -219,6 +225,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Traffic event coming (launch, sale) | [§24.4 load test](#244-load-test-before-the-event-not-after-it) |
 | No backup strategy yet | [§25](#25-backups-you-have-actually-restored) |
 | "I upgraded but it still shows the old plan" | [§26](#26-caching--deciding-how-wrong-your-data-may-be) |
+| CI bill / minutes blew up | [§27](#27-cicd-cost-control) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -6181,7 +6188,212 @@ your data may be, and for how long.
 
 ---
 
-## 27. Meta
+## 27. CI/CD Cost Control
+
+Your pipeline blew through the free tier on day 19, mid-sprint, and now the
+builds have stopped. The CI that scales isn't the one with the most features —
+it's the one that **doesn't surprise you**.
+
+> **Sequence this cheapest-first.** Self-hosted runners get suggested first
+> and they're the highest-effort, highest-risk option. Most overruns
+> disappear with conditional pipelines and caching, which take an hour and
+> carry no operational burden. Do §27.1 and §27.2, re-measure, and only then
+> decide whether §27.3 is worth owning a server for.
+>
+> And one thing this optimization must never do: weaken the §18.2 gate.
+> Saving minutes by skipping tests is how you buy the §19 problem.
+
+### 27.1 Run only what the change requires
+- **Rule:** Scope jobs with path filters so a README change doesn't trigger
+  integration tests and a marketing-page change doesn't rebuild the backend.
+  Cancel superseded runs automatically when someone pushes again.
+- **Explanation:** Most teams run the full suite on every push and call it
+  thorough; it's mostly waste, because the majority of commits touch a slice
+  of the codebase and the rest of the pipeline is verifying code that didn't
+  change. Concurrency cancellation is the bigger and less obvious win — push
+  five times while iterating on a PR and you've paid for five full pipelines
+  where only the last result mattered. Both changes cut minutes without
+  reducing what actually gets verified before merge.
+- **Applies to:** Every CI setup, especially monorepos where the ratio of
+  changed to unchanged code is smallest. Stacks: GitHub Actions `paths`
+  filters and `concurrency`, `dorny/paths-filter` for job-level conditions,
+  Turborepo/Nx affected-project detection for monorepos.
+- **Example:**
+  ```yaml
+  # Cancel the previous run when a new commit lands on the same branch
+  concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true          # ← often the single biggest saving
+
+  on:
+    pull_request:
+      paths-ignore:                   # these never need a build
+        - '**.md'
+        - 'docs/**'
+        - '.github/ISSUE_TEMPLATE/**'
+        - 'LICENSE'
+
+  jobs:
+    changes:                          # decide once, reuse everywhere
+      outputs:
+        backend:  ${{ steps.f.outputs.backend }}
+        frontend: ${{ steps.f.outputs.frontend }}
+      steps:
+        - uses: dorny/paths-filter@v3
+          id: f
+          with:
+            filters: |
+              backend:  ['src/api/**', 'prisma/**', 'package.json']
+              frontend: ['src/web/**', 'package.json']
+
+    backend-tests:
+      needs: changes
+      if: needs.changes.outputs.backend == 'true'
+      # …
+  ```
+  ```
+  Guardrail: path filters must never let a change skip the check that
+  would have caught its bug. Two rules that keep this safe —
+
+    · Lockfiles and shared config (package.json, tsconfig, Dockerfile)
+      belong in EVERY filter — they can break anything.
+    · Merge queues / required checks must handle skipped jobs correctly,
+      or a skipped job reads as "passed" and your gate has a hole.
+      In GitHub, use a final aggregate job that requires the others.
+  ```
+
+### 27.2 Cache everything reusable
+- **Rule:** Cache dependencies, build outputs, and Docker layers between runs.
+  A pipeline that reinstalls from scratch every time is paying for the same
+  work repeatedly.
+- **Explanation:** Dependency installation is frequently the largest single
+  block of time in a pipeline and it's almost entirely redundant — the same
+  packages, resolved the same way, downloaded again. Caching keyed on the
+  lockfile turns minutes into seconds and only re-installs when dependencies
+  genuinely change. Combined with the §20.3 fast/slow split, this usually
+  removes the overrun on its own, which is why it comes before any decision
+  about hosting your own compute.
+- **Applies to:** Every pipeline. Stacks: `actions/setup-node` with
+  `cache: 'npm'`, `actions/cache` keyed on lockfile hashes, Docker BuildKit
+  layer caching with `cache-from`/`cache-to`, Turborepo remote cache, Gradle
+  and Maven caches.
+- **Example:**
+  ```yaml
+  steps:
+    - uses: actions/checkout@v4
+      with: { fetch-depth: 1 }        # shallow clone — don't pull all history
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: 'npm'                  # keyed on package-lock.json
+
+    - run: npm ci --prefer-offline    # seconds instead of minutes
+
+    - uses: actions/cache@v4          # cache build output too
+      with:
+        path: .next/cache
+        key: build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+        restore-keys: build-${{ hashFiles('package-lock.json') }}-
+  ```
+  ```
+  Other minute savers worth taking, roughly by value:
+
+    [ ] Shallow clone (fetch-depth: 1) unless you need git history
+    [ ] Run the fast job first and fail early — lint/typecheck before
+        a 5-minute test suite (§20.3)
+    [ ] Parallelize independent jobs rather than chaining them
+    [ ] Only build Docker images on merge, not on every PR push
+    [ ] Right-size the runner: bigger runners cost more per minute but
+        can cost LESS overall if they finish proportionally faster —
+        measure rather than assume, in either direction
+    [ ] Skip e2e on draft PRs; run them when marked ready for review
+    [ ] Set a job timeout so a hung run can't burn the whole budget
+        (timeout-minutes: 15) ← cheap insurance against one bad job
+  ```
+
+### 27.3 Self-host runners only when the math and the security model both work
+- **Rule:** Self-hosted runners trade a per-minute bill for a fixed server
+  cost and unlimited minutes. Take that trade only after §27.1–27.2, and
+  **never attach a self-hosted runner to a public repository.**
+- **Explanation:** The arithmetic is genuinely compelling — a $20/month server
+  replacing $1,200 of overage is not a close call — but the price isn't only
+  money. You now own the machine, the runner software, the OS updates, and
+  the outage when it dies mid-sprint. The security constraint is the harder
+  one: on a public repo, anyone can open a pull request, and on a self-hosted
+  runner that PR's workflow executes **their code on your machine**, inside
+  your network, with whatever the runner can reach. That's not a
+  misconfiguration risk, it's the documented default behavior. Private repos
+  with trusted contributors are the safe case.
+- **Applies to:** Teams consistently exceeding hosted minutes on private
+  repos. Stacks: a VPS or a spare machine with the GitHub Actions runner,
+  ideally **ephemeral** (fresh container per job) via
+  actions-runner-controller on Kubernetes or `--ephemeral` registration.
+  GitLab, CircleCI, and Buildkite all have equivalents.
+- **Example:**
+  ```
+  Run the numbers before deciding — the honest version:
+
+    Hosted:     18,000 min/month × $0.008     = $144/mo (plus overage
+                spikes that are the actual problem)
+    Self-hosted: $20/mo server
+                 + ~2h/month of your time maintaining it
+                 + the risk of a runner outage blocking every merge
+    → worth it above roughly a few hundred dollars of overage, or when
+      you need hardware the hosted runners don't offer
+
+  NON-NEGOTIABLE rules if you self-host:
+    ✗ NEVER on a public repo — fork PRs execute untrusted code on your
+      machine. There is no setting that makes this safe.
+    ✓ Ephemeral runners: a fresh, clean environment per job, so one
+      job cannot leave anything behind for the next
+    ✓ Isolate the network: the runner should not reach production
+      databases or internal services (§23.2)
+    ✓ No long-lived production credentials on the runner (§11.1) —
+      use short-lived OIDC tokens to your cloud provider
+    ✓ Keep the runner software updated; it is internet-facing software
+    ✓ Keep a hosted fallback configured, so a dead runner degrades to
+      "more expensive" rather than "nobody can merge"
+  ```
+
+### 27.4 Alert at 75%, not at 100%
+- **Rule:** Track minute consumption weekly and set an alert at ~75% of your
+  monthly allocation. When the alert fires you still have time to optimize;
+  when the pipeline stops you have none.
+- **Explanation:** This is the same shape as every other threshold in this
+  document (§16.2's dispute rate, §24.3's rate limits): the useful signal is
+  the trend, and the useless one is the wall. Hitting the limit on day 19 is
+  an emergency that stops all merges mid-sprint; crossing 75% on day 14 is a
+  scheduled hour of work. Weekly review also catches the specific failure that
+  produces most surprise bills — one new workflow, or one job that started
+  timing out and retrying, quietly consuming multiples of everything else.
+- **Applies to:** Every paid CI plan and every metered build service. Stacks:
+  GitHub Settings → Billing → Actions usage, plus a spending limit set
+  deliberately; the same principle as §8.4's spend alerts on every metered API.
+- **Example:**
+  ```
+  The weekly check — five minutes, on a calendar, not on memory:
+
+    [ ] % of monthly minutes consumed vs % of the month elapsed
+        (day 14 of 30 at 75% consumed = you will run out on day 19)
+    [ ] Which workflow consumed the most? Did anything change recently?
+    [ ] Any job whose average duration jumped? (a slow test, a retry
+        loop, a hung step without a timeout)
+    [ ] Failed runs as a share of total — failures cost the same
+        minutes and produce nothing
+
+  Configure once:
+    [ ] Alert at 75% of the allocation, to a channel someone reads
+    [ ] A hard spending limit set to a number you're willing to pay,
+        so the worst case is a stopped pipeline rather than a bill
+    [ ] Job-level timeout-minutes on every job (§27.2)
+    [ ] Note your minute burn in the same place as your other metered
+        spend — CI is an API with a quota like any other (§24.3)
+  ```
+
+---
+
+## 28. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
