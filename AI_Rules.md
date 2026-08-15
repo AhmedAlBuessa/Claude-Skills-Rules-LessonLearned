@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–22**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–23**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–22)
+### Part II — What it builds, and the business under it (5–23)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -171,8 +171,14 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [22.2 Automate the checks into CI — catch regressions, not just today's bugs](#222-automate-the-checks-into-ci--catch-regressions-not-just-todays-bugs)
   - [22.3 Test the two-thirds automation misses — keyboard and screen reader](#223-test-the-two-thirds-automation-misses--keyboard-and-screen-reader)
   - [22.4 Publish an accessibility statement only after it's true](#224-publish-an-accessibility-statement-only-after-its-true)
+- [23. Context-Aware Authorization](#23-context-aware-authorization)
+  — *roles say who; context says whether to trust them right now*
+  - [23.1 Evaluate attributes per request, not roles at login](#231-evaluate-attributes-per-request-not-roles-at-login)
+  - [23.2 Re-verify on every request — including service to service](#232-re-verify-on-every-request--including-service-to-service)
+  - [23.3 Score session risk continuously — a login check expires immediately](#233-score-session-risk-continuously--a-login-check-expires-immediately)
+  - [23.4 Step up rather than block — and tune against real users](#234-step-up-rather-than-block--and-tune-against-real-users)
 
-- [23. Meta](#23-meta)
+- [24. Meta](#24-meta)
 
 ---
 
@@ -191,6 +197,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Setting up a test suite | [§20](#20-test-discipline) |
 | Deploying an AI support agent | [§21](#21-where-the-ai-support-agent-stops-and-you-start) |
 | Worried about accessibility lawsuits | [§22](#22-accessibility--real-legal-exposure-real-fix) |
+| Stolen credentials / account takeover | [§23](#23-context-aware-authorization) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -5397,7 +5404,227 @@ looks rather than contrast. So the risk is real and the exposure is genuine.
 
 ---
 
-## 23. Meta
+## 23. Context-Aware Authorization
+
+A stolen password logs in at 3am from another country and your app says
+"welcome back." Same role, same permissions, same access to everything —
+because your AI built **static roles that never evaluate context**.
+
+Three layers fix it: **attributes evaluated per request**, **zero trust on
+every internal hop**, and **continuous session risk scoring**. Roles tell you
+*who* someone is. Context tells you whether to trust them *right now*.
+
+> **Sequence this correctly.** The scenario above — a stolen password used
+> from an unfamiliar device — is blocked outright by phishing-resistant MFA
+> (passkeys/WebAuthn), which takes days to ship. A policy engine takes months.
+> Do MFA first, then build the layers below for what MFA can't cover: session
+> hijacking, insider misuse, over-broad access, and compromised tokens.
+> Same ladder logic as §11.4 — take the highest rung you can actually operate.
+
+### 23.1 Evaluate attributes per request, not roles at login
+- **Rule:** Authorization decisions consider the request's context — time,
+  location, device, IP reputation, and the sensitivity of the data being
+  touched — not just the caller's role. Same role plus different context
+  should be able to produce a different decision.
+- **Explanation:** A static role is a decision made once, at login, and then
+  trusted for hours. That's why a stolen session behaves identically to the
+  real user: nothing re-examines the situation. Attribute-based checks let you
+  say "finance records, from an unrecognized device, at 3am" is a different
+  proposition from the same user on their known laptop at 2pm — step it up or
+  deny it, without changing anyone's role. Keeping policy in one engine rather
+  than scattered `if` statements is what makes it auditable and changeable
+  without a deploy.
+- **Applies to:** Any app with sensitive data or privileged roles — fintech,
+  healthcare, HR, admin panels, anything multi-tenant. Stacks: Oso, Casbin,
+  OpenFGA, or Cedar for a real engine; OPA/Rego if you're already on
+  Kubernetes. A single well-tested policy function is a fine starting point —
+  the point is centralization, not the library.
+- **Example:**
+  ```typescript
+  // One place decides. Handlers ask; they don't implement policy.
+  type Ctx = {
+    user: { id: string; role: Role; mfaAt: Date | null };
+    device: { fingerprint: string; known: boolean };
+    net: { ip: string; country: string; reputation: 'clean'|'proxy'|'malicious' };
+    resource: { type: string; sensitivity: 'public'|'internal'|'financial'|'phi' };
+    action: 'read' | 'write' | 'delete' | 'export';
+  };
+
+  function authorize(c: Ctx): 'allow' | 'step_up' | 'deny' {
+    if (!can(c.user.role, c.resource.type, c.action)) return 'deny';  // RBAC first
+    if (c.net.reputation === 'malicious') return 'deny';
+
+    const sensitive = c.resource.sensitivity === 'financial'
+                   || c.resource.sensitivity === 'phi';
+    const risky = !c.device.known
+               || c.net.country !== c.user.homeCountry
+               || isOutsideBusinessHours(c.user.timezone);
+
+    if (sensitive && risky) return 'step_up';           // re-auth, don't deny
+    if (c.action === 'export' && !c.device.known) return 'step_up';
+    if (c.action === 'delete' && sensitive) return 'step_up';
+    return 'allow';
+  }
+  ```
+  ```
+  Attributes worth evaluating, cheapest signal first:
+
+    Device      is this fingerprint known for this user? how long?
+    Location    country change, and impossible travel (§23.3)
+    Time        outside this user's normal hours — learned, not guessed
+    Network     datacenter/VPN/Tor exit, known-bad IP reputation
+    Freshness   how long since they actually proved identity (mfaAt)?
+    Resource    sensitivity tier — financial and PHI get stricter rules
+    Action      read is not export; export and delete deserve friction
+    Volume      is this request part of a burst? (§17.3)
+
+  Start with device + sensitivity + action. That trio catches most of
+  the realistic damage and needs no external data sources.
+  ```
+
+### 23.2 Re-verify on every request — including service to service
+- **Rule:** Every API call, database access, and internal service hop verifies
+  identity and authorization independently. Never treat "inside the network"
+  or "already authenticated at the gateway" as proof of anything.
+- **Explanation:** AI-built systems assume a perimeter: check the login,
+  then trust everything behind it. That means one compromised service, one SSRF
+  bug, or one leaked internal token gives an attacker everything the internal
+  network can reach. Zero trust assumes there is no perimeter — each request
+  proves itself or is rejected. Practically this means the authorization check
+  lives in the handler that touches the data, not in a gateway or middleware
+  someone can route around, and internal callers carry verifiable identity
+  rather than a shared secret everyone knows.
+- **Applies to:** Any system with more than one service, any internal admin
+  tool, any background worker with database access. Stacks: short-lived signed
+  tokens between services (§11.1), mTLS or a service mesh (Istio, Linkerd),
+  cloud workload identity (IAM roles, GCP Workload Identity), and Postgres RLS
+  so the database enforces tenancy even if application code forgets.
+- **Example:**
+  ```typescript
+  // WRONG — the gateway checked, so the service trusts the header
+  app.get('/internal/users/:id', async (req, res) => {
+    const actorId = req.headers['x-user-id'];     // ← forgeable by anyone
+    res.json(await db.users.findUnique({ where: { id: req.params.id } }));
+  });
+
+  // RIGHT — verify the caller, then authorize the specific action
+  app.get('/internal/users/:id', async (req, res) => {
+    const caller = await verifyServiceToken(req.headers.authorization);  // signed, short-lived
+    const decision = authorize({ ...ctxFrom(req), user: caller.onBehalfOf,
+                                 resource: { type: 'user', sensitivity: 'internal' },
+                                 action: 'read' });
+    if (decision !== 'allow') return res.status(403).end();
+
+    const user = await db.users.findFirst({
+      where: { id: req.params.id, orgId: caller.onBehalfOf.orgId },  // tenancy (§17.2)
+      select: PUBLIC_USER_FIELDS,                                    // exposure (§17.1)
+    });
+    res.json(user);
+  });
+  ```
+  ```sql
+  -- Belt and braces: let the database enforce tenancy too, so an
+  -- application bug cannot leak across tenants.
+  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY tenant_isolation ON documents
+    USING (org_id = current_setting('app.current_org_id')::uuid);
+  ```
+
+### 23.3 Score session risk continuously — a login check expires immediately
+- **Rule:** Keep evaluating the session after login. Watch for impossible
+  travel, abnormal data-access volume, and privilege-escalation attempts, and
+  challenge or terminate automatically when behavior shifts mid-session.
+- **Explanation:** Authentication proves who someone was at one moment; it
+  says nothing about the next eight hours. Session hijacking, a stolen token,
+  or a laptop left unlocked all produce a valid session behaving unlike its
+  owner. Continuous scoring catches what point-in-time checks structurally
+  cannot — a session that starts legitimately and turns hostile. The three
+  signals in the rule are the high-value ones because each is hard to fake and
+  cheap to compute from data you already log (§14.4).
+- **Applies to:** Any app with sessions longer than a few minutes, especially
+  admin consoles and anything holding financial or personal data. Stacks: your
+  §9.4 audit log plus §17.3's access log are the inputs — this is largely a
+  query and a rule set, not new infrastructure.
+- **Example:**
+  ```typescript
+  // Signals, scored per request; the session carries a running risk value.
+  const RISK = {
+    impossibleTravel:  60,  // 2 countries, physically impossible interval
+    newDevice:         25,
+    ipReputationBad:   40,  // datacenter, Tor, known-bad
+    volumeAnomaly:     35,  // >10x this user's own baseline (§17.3)
+    privEscalation:    50,  // attempted access above their role
+    sensitiveAtOdd:    20,  // financial/PHI outside normal hours
+    mfaStale:          15,  // no identity proof in > 12h
+  };
+
+  // Act on the total, not any single signal — one alone is usually benign
+  if (score >= 80)      { await terminateSession(s); await alertSecurity(s); }
+  else if (score >= 50) { await requireStepUp(s); }        // re-auth now
+  else if (score >= 30) { await flagForReview(s); }        // log + watch
+  ```
+  ```sql
+  -- Impossible travel: the highest-signal, lowest-effort detection.
+  SELECT user_id, country, prev_country, occurred_at, prev_at
+  FROM (
+    SELECT user_id, country, occurred_at,
+           LAG(country)     OVER w AS prev_country,
+           LAG(occurred_at) OVER w AS prev_at
+    FROM auth_events WHERE occurred_at > NOW() - INTERVAL '24 hours'
+    WINDOW w AS (PARTITION BY user_id ORDER BY occurred_at)
+  ) t
+  WHERE country <> prev_country
+    AND occurred_at - prev_at < INTERVAL '2 hours';   -- no flight is that fast
+  ```
+
+### 23.4 Step up rather than block — and tune against real users
+- **Rule:** Default to re-authentication, not denial. Measure your false
+  positive rate before tightening any rule, and never let a context rule lock
+  a legitimate customer out of their own account with no path forward.
+- **Explanation:** Context rules built without calibration punish exactly the
+  people who look unusual and aren't: travelers, remote workers, VPN users,
+  night-shift staff, and anyone on mobile networks that rotate IPs across
+  countries. Denial turns a security control into a support ticket and a churn
+  event; step-up gets the same protection while leaving the real user a way
+  through in ten seconds. The measurable version of "is this rule good" is the
+  ratio of challenges to confirmed threats — if you're challenging hundreds of
+  people to catch nothing, the rule is costing more than it prevents.
+- **Applies to:** Every context or risk rule you ship. Stacks: WebAuthn/passkey
+  re-auth for step-up (fast and phishing-resistant), TOTP as fallback; SMS only
+  as a last resort. Log every decision to §9.4 so the rule can be evaluated
+  rather than argued about.
+- **Example:**
+  ```
+  Response ladder — pick the lightest thing that works:
+
+    ALLOW + LOG      low risk. Record it; you'll need the baseline.
+    STEP UP          re-auth with a passkey. ~10 seconds for the real
+                     user, a hard stop for someone without the device.
+    RESTRICT         allow read, block export/delete/settings until
+                     they re-auth. Keeps them working, caps the damage.
+    TERMINATE        end the session, notify the user by email, force
+                     full re-auth. Reserve for high scores.
+    LOCK + NOTIFY    highest tier only, and ALWAYS with a self-service
+                     recovery path. A lockout with no way back is an
+                     outage you inflicted on your own customer.
+
+  Before tightening any rule, measure it for two weeks in log-only mode:
+
+    challenges issued          412
+    confirmed threats            3
+    legitimate users challenged 409   ← 99.3% false positive
+    support tickets caused      27
+    → this rule is not ready. Loosen it, or use RESTRICT not TERMINATE.
+
+  Always notify the user out of band on a security action — email them
+  when a session is terminated or a device is newly trusted. The real
+  owner learning "we blocked a login from Brazil" is the single most
+  valuable alert in the system, and it costs one email.
+  ```
+
+---
+
+## 24. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
