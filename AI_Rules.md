@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–23**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–26**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–23)
+### Part II — What it builds, and the business under it (5–26)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -177,8 +177,26 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [23.2 Re-verify on every request — including service to service](#232-re-verify-on-every-request--including-service-to-service)
   - [23.3 Score session risk continuously — a login check expires immediately](#233-score-session-risk-continuously--a-login-check-expires-immediately)
   - [23.4 Step up rather than block — and tune against real users](#234-step-up-rather-than-block--and-tune-against-real-users)
+- [24. Scaling — Surviving 100 Users at Once](#24-scaling--surviving-100-users-at-once)
+  — *not a million users; a hundred at the same moment*
+  - [24.1 Pool your database connections before you need to](#241-pool-your-database-connections-before-you-need-to)
+  - [24.2 Queue expensive work instead of doing it inline](#242-queue-expensive-work-instead-of-doing-it-inline)
+  - [24.3 Treat external rate limits as a design constraint](#243-treat-external-rate-limits-as-a-design-constraint)
+  - [24.4 Load test before the event, not after it](#244-load-test-before-the-event-not-after-it)
+- [25. Backups You Have Actually Restored](#25-backups-you-have-actually-restored)
+  — *an untested backup is a guess*
+  - [25.1 Pick your acceptable data loss, then set frequency to match](#251-pick-your-acceptable-data-loss-then-set-frequency-to-match)
+  - [25.2 Store the copy somewhere your primary failure cannot reach](#252-store-the-copy-somewhere-your-primary-failure-cannot-reach)
+  - [25.3 Restore it monthly, or you don't have a backup](#253-restore-it-monthly-or-you-dont-have-a-backup)
+  - [25.4 Protect the backups themselves](#254-protect-the-backups-themselves)
+- [26. Caching — Deciding How Wrong Your Data May Be](#26-caching--deciding-how-wrong-your-data-may-be)
+  — *speed is easy; deciding what may be wrong is the decision*
+  - [26.1 Classify every cached thing by how stale it may be](#261-classify-every-cached-thing-by-how-stale-it-may-be)
+  - [26.2 Invalidate on the event, not on a timer — and name the owner](#262-invalidate-on-the-event-not-on-a-timer--and-name-the-owner)
+  - [26.3 Prevent the stampede before your biggest day](#263-prevent-the-stampede-before-your-biggest-day)
+  - [26.4 Cache bugs surface as tickets, not errors — detect them deliberately](#264-cache-bugs-surface-as-tickets-not-errors--detect-them-deliberately)
 
-- [24. Meta](#24-meta)
+- [27. Meta](#27-meta)
 
 ---
 
@@ -198,6 +216,9 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Deploying an AI support agent | [§21](#21-where-the-ai-support-agent-stops-and-you-start) |
 | Worried about accessibility lawsuits | [§22](#22-accessibility--real-legal-exposure-real-fix) |
 | Stolen credentials / account takeover | [§23](#23-context-aware-authorization) |
+| Traffic event coming (launch, sale) | [§24.4 load test](#244-load-test-before-the-event-not-after-it) |
+| No backup strategy yet | [§25](#25-backups-you-have-actually-restored) |
+| "I upgraded but it still shows the old plan" | [§26](#26-caching--deciding-how-wrong-your-data-may-be) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -207,7 +228,8 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 **Artifacts this document tells you to create:** `CUSTOMER_CEILING.md` (§5.4) ·
 `RETENTION_SCHEDULE.md` (§6.3) · `INCIDENT_RUNBOOK.md` (§8.5) ·
 `SECURITY_POSTURE.md` (§10.2) · `VENDOR_RISK.md` (§10.3) ·
-`LAUNCH_READINESS.md` (§10.5) · `SECRETS_POSTURE.md` (§11.4)
+`LAUNCH_READINESS.md` (§10.5) · `SECRETS_POSTURE.md` (§11.4) ·
+`RESTORE_LOG.md` (§25.3) · `CACHE_POLICY.md` (§26.1)
 
 ---
 
@@ -5624,7 +5646,542 @@ every internal hop**, and **continuous session risk scoring**. Roles tell you
 
 ---
 
-## 24. Meta
+## 24. Scaling — Surviving 100 Users at Once
+
+*(Source: "layer 11 of 13" in a production-readiness series.)*
+
+This is the layer that breaks at the worst possible moment, and it isn't about
+a million users — it's about surviving **100 simultaneous** ones without
+falling over. Three things break first: database connections max out,
+serverless functions cold-start in a stampede, and external API rate limits
+kick in.
+
+The last one is the nastiest: your app doesn't crash, it just stops working
+for *some* users and not others, and you don't know which. That's worse than
+a crash, because a crash at least tells you.
+
+### 24.1 Pool your database connections before you need to
+- **Rule:** Put a connection pooler in front of your database from day one.
+  Postgres defaults to roughly 100 connections; without pooling, every request
+  or function instance opens its own and you hit the ceiling under load.
+- **Explanation:** Connection exhaustion doesn't degrade gracefully — it
+  fails hard, for everyone, at once. Serverless makes it dramatically worse:
+  each concurrent function instance is its own process with its own
+  connection, so 200 concurrent invocations means 200 connections against a
+  100-connection limit. The pooler multiplexes many clients onto few real
+  connections, which is why it's the single highest-leverage scaling fix and
+  usually a URL change rather than a project.
+- **Applies to:** Any Postgres/MySQL app, urgently if it's serverless.
+  Stacks: PgBouncer, Supabase's pooler port, Neon or PlanetScale's built-in
+  pooling, Prisma Accelerate, RDS Proxy. Use **transaction** mode for
+  serverless (session mode holds connections too long), and note that
+  transaction mode disables prepared statements and `LISTEN/NOTIFY`.
+- **Example:**
+  ```
+  Serverless connection math — why this breaks so suddenly:
+
+    100 concurrent requests
+      × 1 function instance each
+      × 1 database connection each
+      = 100 connections … against a limit of ~100 (minus admin reserve)
+    → the 98th user gets "too many connections", not a slow page
+
+  With a pooler in transaction mode:
+    100 function instances → pooler → ~10 real DB connections
+    → the same load, comfortably
+
+  Configuration that matters:
+    · Pool size ≈ (CPU cores × 2) + effective spindles — bigger is NOT
+      better; too many connections makes Postgres slower, not faster
+    · Set a statement timeout so one runaway query can't hold a slot
+    · Set an idle-in-transaction timeout — leaked transactions are the
+      most common cause of "pool exhausted" with plenty of headroom
+    · Use the POOLED url for the app, the DIRECT url for migrations
+  ```
+
+### 24.2 Queue expensive work instead of doing it inline
+- **Rule:** Anything slow or rate-limited — AI calls, PDF generation, bulk
+  email, image processing, third-party syncs — goes on a queue with bounded
+  concurrency. The request returns immediately; the work happens behind it.
+- **Explanation:** Inline expensive work couples your capacity to the slowest
+  thing you call: 100 users triggering AI calls at once means 100 concurrent
+  upstream requests, held connections, and functions timing out. A queue
+  converts a spike into a line — the same work completes, just at a rate you
+  control, and the user gets an immediate response with a status to watch.
+  Bounded concurrency is also what keeps you inside external rate limits
+  (§24.3) by construction rather than by luck.
+- **Applies to:** Any operation over ~2 seconds, anything hitting a metered
+  API, anything that can be retried. Stacks: BullMQ/Redis, Inngest, Trigger.dev,
+  QStash, SQS + Lambda, Cloud Tasks. Pair with §12.3 retries and §12.4
+  idempotency — queues redeliver, so handlers must be safe to run twice.
+- **Example:**
+  ```typescript
+  // Inline (breaks at ~20 concurrent) → queued (breaks at never)
+  app.post('/api/generate', async (req, res) => {
+    const job = await queue.add('ai.generate',
+      { userId: req.user.id, prompt: req.body.prompt },
+      { jobId: `gen-${req.body.requestId}`,          // idempotent (§12.4)
+        attempts: 3, backoff: { type: 'exponential', delay: 1000 } });  // §12.3
+    res.status(202).json({ jobId: job.id, status: 'queued' });
+  });
+
+  // Worker: concurrency is the dial that keeps you under the upstream limit
+  new Worker('ai.generate', handler, { concurrency: 5,
+    limiter: { max: 50, duration: 60_000 } });     // ≤50/min to the provider
+  ```
+  ```
+  What the user sees matters as much as the queue (§12.2, §12.5):
+    [ ] Immediate 202 with a job id — never a hanging request
+    [ ] A visible status: queued → processing → done/failed
+    [ ] An honest ETA when the queue is deep ("about 2 minutes")
+    [ ] Notification on completion (in-app, or email for long jobs)
+    [ ] Failures surface with a reason and a retry (§12.1)
+    [ ] Credits reserved up front and refunded on failure (§13.2)
+  ```
+
+### 24.3 Treat external rate limits as a design constraint
+- **Rule:** Know the published limit of every external API you call, keep your
+  own concurrency below it, and handle `429` explicitly with backoff plus
+  `Retry-After`. Never let an upstream limit produce a silent partial failure.
+- **Explanation:** Rate limits produce the failure mode that's worse than
+  downtime: the app keeps working for most people while quietly failing for
+  the rest, and nothing in your dashboards says which. The fix has two halves.
+  Stay under the limit by construction (§24.2's bounded concurrency), and when
+  you do hit one, make it visible — a `429` should retry with backoff (§12.3)
+  and, if it still fails, produce a clear user-facing state and an alert
+  (§14.5), never a swallowed exception.
+- **Applies to:** Every third-party API — LLM providers, Stripe, email, SMS,
+  maps, search. Sharpest for AI features where a single user action can fan
+  out into many upstream calls. Stacks: per-provider limiters in your queue,
+  a shared Redis token bucket if multiple services call the same provider.
+- **Example:**
+  ```
+  Write the limits down — you cannot design around numbers you don't know:
+
+    Provider      Limit (check current docs)   Your ceiling   Behavior at limit
+    ────────────  ───────────────────────────  ─────────────  ─────────────────
+    LLM API       requests/min AND tokens/min  60% of it      queue + backoff
+    Stripe        ~100 req/s                   50 req/s       backoff (§12.3)
+    Email         per-day send quota           80% of it      queue + alert
+    Geocoding     per-day quota                cache results  serve cached
+
+  Rules that follow:
+    · Budget to ~60-80% of the limit — leave room for retries and spikes
+    · Honor Retry-After; your backoff guess is worse than their instruction
+    · Cache anything idempotent and slow-changing (§26)
+    · Alert when you cross 70% of a limit, not when you hit 100%
+    · Track your own limit-hit rate as a metric — rising means you are
+      about to have a bad day, and it is the earliest warning you get
+  ```
+
+### 24.4 Load test before the event, not after it
+- **Rule:** Find your actual ceiling with a load test against staging (§18.1)
+  before launch day, Black Friday, or a feature announcement. Know the number
+  at which you break, and what breaks first.
+- **Explanation:** Every fix above assumes you know where the limit is, and
+  nobody does until they measure. A one-hour test tells you the concrete
+  number — "we degrade at 340 concurrent users, and connections go first" —
+  which turns capacity from anxiety into arithmetic. It also finds the
+  ordering, which is the useful part: the component that fails first is where
+  the next hour of work belongs, and it's frequently not the one anyone
+  guessed.
+- **Applies to:** Any product with a known traffic event ahead of it, and any
+  product before launch. Stacks: k6, Artillery, or Locust against staging with
+  production-like data volume — testing against an empty database measures
+  nothing, because query plans change with row counts.
+- **Example:**
+  ```javascript
+  // k6 — ramp until something gives, then read the ordering
+  export const options = {
+    stages: [
+      { duration: '2m', target: 50  },
+      { duration: '5m', target: 200 },   // the realistic spike
+      { duration: '2m', target: 500 },   // find the ceiling
+      { duration: '2m', target: 0   },
+    ],
+    thresholds: {
+      http_req_duration: ['p(95)<1000'],
+      http_req_failed:   ['rate<0.01'],
+    },
+  };
+  ```
+  ```
+  Record the answers where you'll find them later:
+
+    Breaking point       ~340 concurrent users
+    First to fail        DB connections (pool exhausted at 320)
+    Second               LLM provider 429s at ~180 concurrent generations
+    p95 at 200 users     840ms  (acceptable)
+    p95 at 300 users     4.2s   (not acceptable)
+    Recovery after spike 90 seconds to baseline
+
+  Then decide deliberately: is 340 enough for the event you have coming?
+  If yes, stop — this is not a reason to re-architect. If no, you now
+  know exactly which single thing to fix first.
+  ```
+
+---
+
+## 25. Backups You Have Actually Restored
+
+Your app has no backup strategy, so your users have no protection. Three
+decisions fix it: **how much data you can afford to lose**, **where the copy
+lives**, and **whether you've ever proved it works**.
+
+The third is the one people skip. A backup you've never restored isn't a
+safety net — it's a guess.
+
+### 25.1 Pick your acceptable data loss, then set frequency to match
+- **Rule:** Decide how much data you can afford to lose (your RPO) and choose
+  a backup frequency that meets it. Daily backups mean accepting up to 24
+  hours of loss. Turn on point-in-time recovery — on managed databases it's a
+  setting, not a project.
+- **Explanation:** "Daily backup" sounds responsible until you price the gap:
+  for a product processing payments, 24 hours of loss is a day of orders you
+  cannot reconstruct, plus every account change, support ticket, and uploaded
+  file in that window. Point-in-time recovery captures continuously and lets
+  you restore to any moment — including one minute before someone ran the bad
+  migration. Nearly every managed database supports it, so the common reason
+  it's off is that nobody opened the settings page.
+- **Applies to:** Every production database, plus object storage (uploads are
+  data too, and are frequently unbacked). Stacks: Supabase PITR (paid tiers),
+  RDS automated backups + PITR, Neon/PlanetScale branching and history, Cloud
+  SQL PITR, MongoDB Atlas continuous backup. For S3/R2, enable versioning.
+- **Example:**
+  ```
+  Decide these two numbers, write them down, then configure to match:
+
+    RPO  Recovery Point Objective — how much data may we lose?
+         payments/orders    → minutes    → PITR required
+         user content       → ~1 hour    → PITR or hourly snapshots
+         analytics/derived  → 24 hours   → daily is fine (rebuildable)
+
+    RTO  Recovery Time Objective — how long may we be down?
+         → this one is measured by §25.3's restore test, not chosen
+
+  What to back up beyond the primary database:
+    [ ] Uploaded files / object storage (enable versioning)
+    [ ] Secrets and env var configuration (§11) — losing these means
+        a restored database you cannot connect to
+    [ ] Infrastructure as code (it's in git — is git itself mirrored?)
+    [ ] Anything in a third-party system you'd need to rebuild:
+        Stripe products/prices, email templates, DNS records
+  ```
+
+### 25.2 Store the copy somewhere your primary failure cannot reach
+- **Rule:** Backups live in a different region and a different account or
+  provider from the thing they protect. A backup on the same server is not a
+  backup — it's a second copy of the same risk.
+- **Explanation:** The events that destroy data destroy everything in their
+  blast radius: a region outage, a deleted project, a compromised cloud
+  account, a bad `DROP` run against the only environment. If the backup shares
+  any of those failure modes, it's gone at exactly the moment it was needed.
+  Separation is the whole property — different region for infrastructure
+  failure, different account or provider for account-level compromise, and
+  separate credentials so an attacker with production access can't delete the
+  backups too.
+- **Applies to:** Every backup. Stacks: cross-region replication in your
+  provider, plus periodic exports to a second provider (Postgres dump → S3 or
+  R2 in a different account). Follow the 3-2-1 shape: 3 copies, 2 media/
+  providers, 1 off-site.
+- **Example:**
+  ```bash
+  # Nightly logical dump to a DIFFERENT provider and account (§18.2 cron)
+  pg_dump "$DATABASE_URL" --format=custom --no-owner \
+    | age -r "$BACKUP_PUBLIC_KEY" \                    # encrypt before it leaves
+    | aws s3 cp - "s3://backups-prod/db/$(date -u +%F-%H%M).dump.age" \
+        --profile backup-account                        # separate credentials
+  ```
+  ```
+  Separation checklist:
+    [ ] Different REGION from the primary
+    [ ] Different ACCOUNT (or provider) — survives account compromise
+    [ ] Separate credentials; production role cannot delete backups
+    [ ] Object Lock / immutability enabled where available
+    [ ] Encrypted at rest AND in transit — backups are full copies of
+        your user data, so §10.4's inventory and §6.3's retention apply
+        to them exactly as they do to the live database
+    [ ] Retention set deliberately: enough history to survive slow
+        corruption you notice late (30-90 days), not "forever" — old
+        backups are liability, not safety (§6.3)
+  ```
+
+### 25.3 Restore it monthly, or you don't have a backup
+- **Rule:** Restore to a test environment at least monthly. Verify the data is
+  complete and the app actually runs against it. Record how long the restore
+  took — that number is your real RTO.
+- **Explanation:** Backups fail silently in ways only a restore reveals:
+  a dump that's been truncating for months, a schema that no longer matches
+  the application, missing extensions, an encryption key nobody kept, or a
+  restore procedure that takes nine hours when you assumed one. Every one of
+  those is discovered either during a scheduled test or during the outage.
+  The test is also the only way to know your RTO, which is a number your
+  enterprise customers (§5.3) and your insurer (§10.2) will both ask for.
+- **Applies to:** Every backup, without exception. Stacks: restore into
+  staging (§18.1) or a scratch database; automate it and alert on failure so
+  it doesn't depend on someone remembering.
+- **Example:**
+  ```
+  The monthly drill — 30 minutes, and it must be a REAL restore:
+
+    1. Restore last night's backup into a scratch database
+    2. Run the app against it (§18.1 staging, pointed at the restore)
+    3. Verify, don't assume:
+       [ ] Row counts on key tables within ~1% of production
+       [ ] The newest row is as recent as the RPO promises
+       [ ] Log in as a test user; load the dashboard; place an order
+       [ ] Foreign keys, indexes, extensions, and sequences all present
+       [ ] Uploaded files resolve (object storage restored too)
+    4. RECORD the wall-clock time from "start" to "app usable"
+    5. If anything failed, that's an incident today — not a note
+
+  # RESTORE_LOG.md
+  | Date       | Backup age | Restore time | App verified | Notes            |
+  |------------|-----------|--------------|--------------|------------------|
+  | 2026-08-01 | 9h        | 22 min       | ✅            | RTO = 22 min     |
+  | 2026-07-01 | 11h       | 3h 40min     | ❌            | missing pgvector |
+
+  That July row is the entire argument for this rule.
+  ```
+
+### 25.4 Protect the backups themselves
+- **Rule:** Backups must be immutable, encrypted, and monitored. An attacker
+  who reaches production must not be able to delete or read them, and a failed
+  backup job must alert someone the same day.
+- **Explanation:** Two failure modes that a working backup strategy still
+  leaves open. First, ransomware and malicious deletion specifically target
+  backups — deletable backups protect you from accidents but not from
+  attackers, which is what immutability (Object Lock) fixes. Second, backup
+  jobs fail quietly: the cron stops, the credential expires, the disk fills,
+  and nobody notices for four months because success is silent. Alert on the
+  *absence* of a successful backup, not just on errors — the same
+  §14.2 principle, applied to your last line of defense.
+- **Applies to:** Every backup pipeline. Stacks: S3/R2 Object Lock in
+  compliance mode, separate IAM principal for backup writes, a dead-man's
+  switch (Healthchecks.io, Cronitor) that alerts when the job *doesn't* run.
+- **Example:**
+  ```
+  [ ] Object Lock / immutability on — backups cannot be deleted or
+      overwritten before their retention expires, by anyone
+  [ ] Backup credentials are write-only where possible; the production
+      role cannot list, read, or delete backups (§8.4)
+  [ ] Encrypted with a key stored SEPARATELY from the backups, and the
+      key itself is backed up — an encrypted backup with a lost key is
+      indistinguishable from no backup
+  [ ] Dead-man's switch: alert if no successful backup in 25 hours
+  [ ] Backup size tracked — a sudden 90% drop means truncation, and it
+      will otherwise go unnoticed until a restore
+  [ ] Restore procedure documented in INCIDENT_RUNBOOK.md (§8.5), with
+      the commands, and NOT dependent on one person being reachable
+  ```
+
+---
+
+## 26. Caching — Deciding How Wrong Your Data May Be
+
+Nobody sets out to build a caching strategy. The app gets slow, somebody adds
+Redis, it gets faster, everyone moves on. Six months later:
+
+- A customer upgraded to Enterprise an hour ago; the dashboard still shows Free
+- A customer paid the price on the page; the receipt shows a different one
+- Sales sees inventory numbers that don't match what customers see
+
+Three different symptoms, one root cause: **you added speed without deciding
+what's allowed to be wrong.** None of these appear as errors — they appear as
+support tickets, refunds, and lost trust.
+
+Caching is not a performance feature. It's a business decision about how wrong
+your data may be, and for how long.
+
+### 26.1 Classify every cached thing by how stale it may be
+- **Rule:** Before caching anything, assign it a staleness budget and write it
+  down. Some data can be stale for hours; pricing, permissions, inventory, and
+  account status can never be stale — not for 30 minutes, not for one minute.
+- **Explanation:** The budget forces the question nobody asked when Redis went
+  in: what does *wrong* cost per minute here? Stale pricing costs money on
+  every transaction in the window. Stale permissions mean a deactivated user
+  still has access. Stale inventory means selling what you can't ship. Against
+  that, a company address five minutes behind costs nothing. The classification
+  is cheap and it converts an invisible accident into an explicit, reviewable
+  decision.
+- **Applies to:** Every cache layer — Redis, CDN, `revalidate` in Next.js,
+  HTTP `Cache-Control`, in-memory maps, React Query's `staleTime`. Stacks:
+  note that CDN and browser caches are the ones you can't purge from your own
+  code, so the budget matters most there.
+- **Example:**
+  ```
+  # CACHE_POLICY.md — write this once, review it when data flows change
+
+  | Data                | Max staleness | Why                              |
+  |---------------------|---------------|----------------------------------|
+  | Company address     | forever       | costs nothing to be behind       |
+  | Blog posts / docs   | 1 hour        | an old headline costs nothing    |
+  | Product catalog     | 5 min         | listing lag is tolerable         |
+  | Search results      | 1 min         | slightly stale is acceptable     |
+  | ─────────────────── | ───────────── | ──────────────────────────────── |
+  | PRICING             | NEVER         | wrong price = wrong charge (§16) |
+  | PERMISSIONS / ROLES | NEVER         | deactivated user keeps access    |
+  | INVENTORY / STOCK   | NEVER         | sell what you can't deliver      |
+  | ACCOUNT STATUS      | NEVER         | past_due user keeps full access  |
+  | CREDIT BALANCE      | NEVER         | overspend past zero (§13.2)      |
+  | AUTH / SESSION      | NEVER         | revoked session still works      |
+
+  The NEVER rows mean: read from the source of truth, every time. If
+  that's too slow, fix the query — do not cache the answer.
+
+  Nuance worth keeping: you may cache these *within a single request*
+  (memoization) — that's not staleness, it's not re-asking twice in the
+  same 50ms. The ban is on caching them ACROSS requests.
+  ```
+
+### 26.2 Invalidate on the event, not on a timer — and name the owner
+- **Rule:** When data changes, the code that changed it clears the cache, in
+  the same transaction or immediately after. Every cache key has a named owner
+  who invalidates it. A TTL is a backstop, never the primary mechanism.
+- **Explanation:** Ask most teams who clears a given cache when the underlying
+  data changes and nobody can answer, because nobody decided — the cache was
+  added to fix speed and the write path was never revisited. Timer-based
+  expiry means every piece of data is simply *wrong* for the length of the
+  timer, and that duration was picked without asking what wrong costs per
+  minute. Event-driven invalidation makes the window approximately zero and
+  puts the responsibility somewhere specific.
+- **Applies to:** Every cached value derived from mutable data. Stacks: Redis
+  `DEL`/tag-based invalidation, Next.js `revalidateTag`/`revalidatePath`,
+  CDN purge APIs, database triggers or outbox events for cross-service
+  invalidation.
+- **Example:**
+  ```typescript
+  // Invalidate where the write happens — not on a schedule somewhere else
+  async function updateSubscriptionPlan(userId: string, plan: Plan) {
+    await db.$transaction(async (tx) => {
+      await tx.subscription.update({ where: { userId }, data: { plan } });
+      await audit({ actorId: userId, action: 'plan.changed', ... });   // §9.4
+    });
+    // Every derived key, listed explicitly. Missing one IS the bug.
+    await cache.del([
+      `user:${userId}:subscription`,
+      `user:${userId}:permissions`,
+      `user:${userId}:limits`,
+      `org:${orgId}:seats`,
+    ]);
+    await revalidateTag(`user-${userId}`);   // and the CDN/ISR layer
+  }
+  ```
+  ```
+  Make ownership explicit, next to the key definition:
+
+    KEY                        OWNER (who invalidates)        TTL backstop
+    user:{id}:subscription     updateSubscriptionPlan()       5 min
+    user:{id}:permissions      grantRole(), revokeRole()      5 min
+    product:{id}:price         updatePrice()                  never cached
+    org:{id}:seats             addMember(), removeMember()    5 min
+
+  If a key has no owner, it is a bug waiting for a support ticket.
+  And if you cannot enumerate every key derived from a piece of data,
+  you cannot safely cache that data — use tags so one call clears the
+  whole family.
+  ```
+
+### 26.3 Prevent the stampede before your biggest day
+- **Rule:** Protect against many requests missing the same key simultaneously.
+  Use a lock so only one caller recomputes, serve stale while revalidating,
+  and jitter your TTLs so keys don't all expire together.
+- **Explanation:** A key expires, a thousand requests arrive for it at once,
+  and all thousand hit the database — the cache you built to protect the
+  database is now attacking it. This never shows up in testing, because tests
+  can't simulate a thousand clients hitting the same expired key in the same
+  second. It shows up on launch day, Black Friday, the day you get featured, or
+  the day you take off. Handling it well isn't about better engineers; it's
+  about knowing the failure mode exists and spending twenty minutes on it.
+- **Applies to:** Any cached value that is expensive to compute and widely
+  requested — homepage data, popular product pages, dashboard aggregates,
+  anything on a hot path. Stacks: Redis `SET NX` locks, `stale-while-
+  revalidate` in HTTP and Next.js ISR, request coalescing (Go's `singleflight`,
+  `p-memoize` in JS).
+- **Example:**
+  ```typescript
+  async function cachedFetch<T>(key: string, ttl: number, compute: () => Promise<T>) {
+    const hit = await redis.get(key);
+    if (hit) return JSON.parse(hit);
+
+    // Only ONE caller recomputes; the rest wait briefly and read the result
+    const lock = await redis.set(`lock:${key}`, '1', { NX: true, EX: 30 });
+    if (!lock) {
+      await sleep(50);
+      return cachedFetch(key, ttl, compute);        // bounded retry
+    }
+    try {
+      const value = await compute();
+      // Jitter: ±10% so a thousand keys don't expire in the same second
+      await redis.set(key, JSON.stringify(value),
+        { EX: Math.floor(ttl * (0.9 + Math.random() * 0.2)) });
+      return value;
+    } finally {
+      await redis.del(`lock:${key}`);
+    }
+  }
+  ```
+  ```
+  The four defenses, in order of effort:
+
+    1. JITTER the TTL       one line. Stops synchronized expiry.
+    2. LOCK on recompute    one caller does the work, others wait.
+    3. SERVE STALE while    return the old value instantly, refresh in
+       revalidating         the background. Best UX, needs a stale copy.
+    4. PRE-WARM             for known events (launch, sale), populate
+                            the cache before opening the doors.
+
+  Also plan for the cache being GONE: if Redis restarts, every key
+  misses at once. Can your database survive a cold cache at peak? If
+  not, the cache is load-bearing infrastructure and needs the same
+  availability treatment as the database (§24.4 will tell you).
+  ```
+
+### 26.4 Cache bugs surface as tickets, not errors — detect them deliberately
+- **Rule:** Add checks that compare cached values against the source of truth
+  for your highest-risk data, and alert on divergence. Do not rely on
+  monitoring to notice — staleness is not an error and produces no exception.
+- **Explanation:** Every symptom in this section's opening arrives as a
+  support ticket, a refund request, or quiet trust damage. Your error tracker
+  (§14) sees nothing, because returning a wrong-but-well-formed value is not a
+  failure by any technical definition. This is §14.2's principle again — the
+  absence of errors is not evidence of correctness — so the detection has to
+  be built deliberately: sample the cache, compare it to the database, and
+  alert when they disagree on anything in the NEVER tier.
+- **Applies to:** Any cached data whose incorrectness costs money or access.
+  Stacks: a scheduled job sampling keys, plus a support-ticket tag
+  (`suspected-stale-data`) so the human signal gets counted rather than
+  resolved one at a time.
+- **Example:**
+  ```typescript
+  // Nightly: sample cached values, compare against the database
+  for (const userId of await sampleActiveUsers(200)) {
+    const cached = await cache.get(`user:${userId}:subscription`);
+    const actual = await db.subscription.findUnique({ where: { userId } });
+    if (cached && cached.plan !== actual.plan) {
+      await alert({ severity: 'high', kind: 'cache_divergence',
+        key: `user:${userId}:subscription`, cached: cached.plan, actual: actual.plan });
+    }
+  }
+  ```
+  ```
+  Signals that you have a staleness problem, none of which are errors:
+
+    · Support tickets saying "I upgraded but it still shows…"
+    · Refund requests citing a price different from the receipt (§16.4)
+    · Users reporting access they should have lost, or lost access
+      they should have
+    · Two internal tools disagreeing about the same number
+    · A bug that "fixes itself" if you wait — that is a TTL expiring,
+      and it is the clearest staleness fingerprint there is
+
+  Tag these tickets. If the count is non-zero, your CACHE_POLICY.md is
+  wrong somewhere — find which row and move it toward NEVER.
+  ```
+
+---
+
+## 27. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
