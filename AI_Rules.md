@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–27**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–29**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–27)
+### Part II — What it builds, and the business under it (5–29)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -201,8 +201,20 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [27.2 Cache everything reusable](#272-cache-everything-reusable)
   - [27.3 Self-host runners only when the math and the security model both work](#273-self-host-runners-only-when-the-math-and-the-security-model-both-work)
   - [27.4 Alert at 75%, not at 100%](#274-alert-at-75-not-at-100)
+- [28. Async Orchestration — Stop Synchronous Chaining](#28-async-orchestration--stop-synchronous-chaining)
+  — *the user shouldn't wait while you send an email*
+  - [28.1 Return the moment the critical work is done](#281-return-the-moment-the-critical-work-is-done)
+  - [28.2 Isolate failures — one background job must not sink the others](#282-isolate-failures--one-background-job-must-not-sink-the-others)
+  - [28.3 Monitor the queue — a silent job failure is worse than a loud one](#283-monitor-the-queue--a-silent-job-failure-is-worse-than-a-loud-one)
+  - [28.4 Decide deliberately what must stay synchronous](#284-decide-deliberately-what-must-stay-synchronous)
+- [29. The Discovery Gap](#29-the-discovery-gap)
+  — *the time between breaking and knowing is your most expensive variable*
+  - [29.1 Monitor business outcomes, not server health](#291-monitor-business-outcomes-not-server-health)
+  - [29.2 Alert on the absence of expected events](#292-alert-on-the-absence-of-expected-events)
+  - [29.3 Never trust your own success signal — reconcile with the system of record](#293-never-trust-your-own-success-signal--reconcile-with-the-system-of-record)
+  - [29.4 Measure your discovery gap and shrink it on purpose](#294-measure-your-discovery-gap-and-shrink-it-on-purpose)
 
-- [28. Meta](#28-meta)
+- [30. Meta](#30-meta)
 
 ---
 
@@ -226,6 +238,8 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | No backup strategy yet | [§25](#25-backups-you-have-actually-restored) |
 | "I upgraded but it still shows the old plan" | [§26](#26-caching--deciding-how-wrong-your-data-may-be) |
 | CI bill / minutes blew up | [§27](#27-cicd-cost-control) |
+| Checkout / request is slow | [§28](#28-async-orchestration--stop-synchronous-chaining) |
+| A customer told you it was broken | [§29](#29-the-discovery-gap) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -236,7 +250,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 `RETENTION_SCHEDULE.md` (§6.3) · `INCIDENT_RUNBOOK.md` (§8.5) ·
 `SECURITY_POSTURE.md` (§10.2) · `VENDOR_RISK.md` (§10.3) ·
 `LAUNCH_READINESS.md` (§10.5) · `SECRETS_POSTURE.md` (§11.4) ·
-`RESTORE_LOG.md` (§25.3) · `CACHE_POLICY.md` (§26.1)
+`RESTORE_LOG.md` (§25.3) · `CACHE_POLICY.md` (§26.1) · `INCIDENT_LOG.md` (§29.4)
 
 ---
 
@@ -6393,7 +6407,401 @@ it's the one that **doesn't surprise you**.
 
 ---
 
-## 28. Meta
+## 28. Async Orchestration — Stop Synchronous Chaining
+
+Checkout takes 12 seconds, and the payment isn't the slow part. Your AI built
+the whole thing as one synchronous chain — charge, write order, generate PDF,
+send receipt, sync CRM, post to Slack — so the user watches a spinner while
+your app sends an email.
+
+Three fixes: **return as soon as the critical work is done**, **isolate the
+rest behind a queue** so a failed receipt can't fail a successful checkout,
+and **monitor that queue**, because a job failing silently is worse than a
+request failing loudly.
+
+> Related: §24.2 queues expensive work to protect *capacity*. This section is
+> about *latency and failure isolation* — same tool, different reason. Handlers
+> still need §12.4 idempotency, because queues redeliver.
+
+### 28.1 Return the moment the critical work is done
+- **Rule:** Identify the minimum work that must complete before the user gets
+  an answer — usually the payment and the order record — and return
+  immediately after it. Everything else moves to a background queue.
+- **Explanation:** Chaining every downstream side effect into the request
+  makes your response time the *sum* of every system you talk to, including
+  ones you don't control. The user is waiting on a CRM sync they will never
+  see. Splitting critical from consequential collapses 12 seconds to under
+  one, and it also means a slow third party degrades your background
+  throughput rather than your checkout. The judgment call is where the line
+  sits, and §28.4 covers getting it wrong in the other direction.
+- **Applies to:** Checkout, signup, upload, publish, invite — any action with
+  a visible response and a tail of side effects. Stacks: BullMQ, Inngest,
+  Trigger.dev, QStash, SQS, Cloud Tasks (see §24.2 for the same list).
+- **Example:**
+  ```typescript
+  // BEFORE — 12 seconds, all of it in front of the user
+  const charge   = await stripe.paymentIntents.create(...);   // 800ms
+  const order    = await db.orders.create(...);               // 40ms
+  const pdf      = await generateInvoicePdf(order);           // 3.2s
+  await sendReceiptEmail(user, pdf);                          // 2.1s
+  await syncToCrm(order);                                     // 4.5s
+  await postToSlack(order);                                   // 1.4s
+  return res.json({ ok: true });
+
+  // AFTER — ~900ms, and the rest is guaranteed rather than blocking
+  const charge = await stripe.paymentIntents.create(          // MUST be sync
+    { amount, currency: 'usd' }, { idempotencyKey: cart.id });
+
+  const order = await db.$transaction(async (tx) => {         // MUST be sync
+    const o = await tx.orders.create({ data: { ...orderData, chargeId: charge.id }});
+    await tx.entitlements.create({ data: { userId, orderId: o.id }});  // §28.4
+    await tx.outbox.createMany({ data: [                      // enqueue in the
+      { job: 'invoice.generate', payload: { orderId: o.id }},  // SAME transaction
+      { job: 'receipt.send',     payload: { orderId: o.id }},
+      { job: 'crm.sync',         payload: { orderId: o.id }},
+    ]});
+    return o;
+  });
+
+  return res.json({ ok: true, orderId: order.publicId });     // user is done
+  ```
+  ```
+  The outbox pattern matters here: writing the job rows inside the same
+  transaction as the order means you can never end up with a paid order
+  whose follow-up work was never queued. A separate worker drains the
+  outbox. Enqueueing to Redis *after* the commit looks equivalent and
+  isn't — the process can die in between, and that gap is exactly where
+  "they paid and got nothing" comes from.
+  ```
+
+### 28.2 Isolate failures — one background job must not sink the others
+- **Rule:** Each background job succeeds or fails independently, with its own
+  retries. A failed receipt email leaves the checkout successful, the order
+  intact, and the customer unaware. Never let a non-critical side effect roll
+  back critical work.
+- **Explanation:** In a synchronous chain, the CRM being down means the
+  customer's payment succeeds and then your handler throws — so they see an
+  error for a purchase that actually completed, and they retry, and now you
+  have the §19 double-charge. Isolation removes that entire class of bug: the
+  money moved, the order exists, the user was told, and the CRM sync retries
+  quietly until it works. This is §12.3's retry logic applied where it's
+  safest, because a queued job has no user waiting on it.
+- **Applies to:** Every side effect that isn't required for the user's next
+  action. Stacks: per-job retry configuration with exponential backoff, plus a
+  dead-letter queue for jobs that exhaust their attempts.
+- **Example:**
+  ```typescript
+  new Worker('receipt.send', handler, {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 2000 },   // 2s, 4s, 8s… (§12.3)
+    removeOnFail: false,                             // keep it for the DLQ
+  });
+
+  // Every handler is idempotent — the queue WILL deliver twice (§12.4)
+  async function handler(job: Job) {
+    const { orderId } = job.data;
+    if (await alreadySent(orderId, 'receipt')) return;   // safe re-run
+    await sendReceiptEmail(orderId);
+    await markSent(orderId, 'receipt');
+  }
+  ```
+  ```
+  Classify every side effect before you queue it:
+
+    CRITICAL (stays synchronous — §28.4)
+      payment capture · order record · entitlement/access grant
+
+    IMPORTANT (queued, retried hard, alerted on failure)
+      receipt email · invoice generation · license key delivery
+      → the customer notices if these never happen
+
+    BEST EFFORT (queued, retried, logged, not alerted)
+      CRM sync · analytics events · Slack notifications
+      → nobody outside the company notices
+
+  The IMPORTANT tier is the one that needs the §28.3 alerting. Best
+  effort failures are noise; important failures are silent broken
+  promises to a paying customer.
+  ```
+
+### 28.3 Monitor the queue — a silent job failure is worse than a loud one
+- **Rule:** Log every failed job with its payload, route exhausted jobs to a
+  dead-letter queue, and alert on failure spikes, queue depth, and job age.
+  A request failure is visible; a queue failure is invisible by construction.
+- **Explanation:** Moving work to the background moves it out of the user's
+  sight — and out of yours, unless you build the visibility back. The failure
+  mode is precise: the customer got their confirmation, so they're waiting for
+  something you've silently stopped trying to send, and nobody finds out until
+  they complain. Queue depth and job age matter as much as error counts,
+  because the worst failures aren't errors at all — a stopped worker produces
+  zero failures and an infinitely growing backlog.
+- **Applies to:** Every queue and background worker. Stacks: BullMQ dashboards
+  (Bull Board, Taskforce), Inngest/Trigger.dev built-in observability, SQS
+  CloudWatch metrics, plus §14.5 alert routing.
+- **Example:**
+  ```
+  The four queue alerts, in order of value:
+
+    1. QUEUE DEPTH growing and not draining
+       → the worker is dead or too slow. This is the alert that catches
+         a stopped worker, which produces NO errors at all.
+    2. OLDEST JOB AGE > threshold (e.g. 15 min for the IMPORTANT tier)
+       → something is stuck; customers are already affected
+    3. FAILURE RATE spike vs the job's own baseline
+       → a dependency broke; find out before the DLQ fills
+    4. DEAD-LETTER QUEUE non-empty
+       → every entry is a promise to a customer you did not keep.
+         Treat the DLQ as a work queue for humans, not an archive.
+
+  Also: a heartbeat on the worker itself. If no job has completed in
+  30 minutes during business hours, alert — the absence of activity is
+  the signal (§29.2). Zero failures and zero successes is not health.
+  ```
+  ```typescript
+  queue.on('failed', async (job, err) => {
+    logger.error({ event: 'job.failed', jobId: job.id, name: job.name,
+                   attempt: job.attemptsMade, payload: job.data, err });  // §14.4
+    if (job.attemptsMade >= job.opts.attempts) {
+      await deadLetter.add(job.name, job.data);
+      if (IMPORTANT_JOBS.has(job.name)) {
+        await alert({ severity: 'high', kind: 'job.exhausted',
+                      name: job.name, payload: job.data });   // a customer is waiting
+      }
+    }
+  });
+  ```
+
+### 28.4 Decide deliberately what must stay synchronous
+- **Rule:** Anything the user's *next action* depends on must complete before
+  you return. Do not move access provisioning, entitlement grants, or balance
+  updates to a queue just because they're slow.
+- **Explanation:** Over-correcting creates a worse bug than the one you fixed.
+  If checkout returns "confirmed" while the entitlement is still queued, the
+  user clicks through to the thing they just bought and it isn't there — so
+  they refresh, contact support, or dispute the charge (§16.4's
+  "product not received"). The rule that keeps this straight: async is for
+  work the user won't look for in the next thirty seconds. If they *will*
+  look, it's synchronous, and the fix for slowness is making it fast rather
+  than deferring it.
+- **Applies to:** Every async/sync boundary decision. Stacks: where the work
+  is genuinely slow and genuinely required, return a `202` with a status the
+  UI polls (§12.2's four states) — an honest "setting up your account…" beats
+  a false "done."
+- **Example:**
+  ```
+  The test: "will the user look for this in the next 30 seconds?"
+
+    YES → synchronous (or a visible pending state, never a false success)
+      · access to the thing they just bought
+      · credit balance after a top-up (§13.2)
+      · the document they just uploaded appearing in the list
+      · the invite they just sent showing as sent
+
+    NO → queue it
+      · receipt email  · invoice PDF  · CRM sync  · analytics
+      · search reindex · thumbnail generation · webhook fan-out
+
+  When required work is genuinely slow, be honest instead of fast:
+
+    return res.status(202).json({ status: 'provisioning', orderId });
+    // UI shows "Setting up your workspace…" with real progress,
+    // then transitions on completion. The user knows where they stand
+    // (§12.5) rather than being told "done" and finding nothing.
+  ```
+
+---
+
+## 29. The Discovery Gap
+
+Every founder learns about their first major production failure the same way:
+a paying customer emails to say the app is broken. Not the monitoring, not the
+alerts, not the dashboard — a customer.
+
+The concrete version: a Stripe webhook handler returned `200` on failed
+charges for six hours. Six hours of customers clicking checkout, receiving
+confirmation emails, and getting nothing. Your database says they paid. Your
+bank says they didn't. Every refund still costs you the transaction fee, and
+every support ticket costs labor.
+
+**The discovery gap — the time between a failure starting and you knowing —
+is the single most expensive variable in your production system.** At 60
+seconds the blast radius is a few transactions and a short apology. At six
+hours it's the day's revenue, plus the customers who leave without telling you
+why.
+
+> Related: §14 is *how* to instrument. This section is *what to watch* —
+> business outcomes rather than server health. Service-recovery figures (a
+> notable share of affected customers never return; the ones who complain tell
+> many others) are indicative industry claims; the direction is what matters.
+
+### 29.1 Monitor business outcomes, not server health
+- **Rule:** Alert on the things your business does — orders completing,
+  payments settling, emails delivering, signups activating — not just CPU,
+  memory, uptime, and error rate. A perfectly healthy server can be failing
+  every customer.
+- **Explanation:** Technical monitoring answers "is the system running," and
+  the expensive failures answer "yes" to that question. A handler returning
+  `200` on a failed charge is, technically, working perfectly: no exception,
+  no error rate, no latency spike, dashboard green. The only signal that
+  something is wrong lives at the business layer — money charged versus
+  product delivered. That's why the instrumentation has to be expressed in
+  business terms, and why §14's error tracking alone would not have caught
+  the six-hour outage.
+- **Applies to:** Every revenue-generating flow. Stacks: your §13.3 usage
+  event stream is already the data source — this is queries and alerts on top
+  of it, not new infrastructure.
+- **Example:**
+  ```
+  Business-level monitors worth having, roughly by value:
+
+    PAYMENT     charges succeeded ≠ orders fulfilled → alert
+                (this is the six-hour failure, caught in minutes)
+    CHECKOUT    completion rate drops below the 7-day baseline
+    SIGNUP      signups completing / signups started
+    DELIVERY    email delivery rate; bounce rate spike
+    ENTITLEMENT paid orders with no access granted (§28.4)
+    QUEUE       IMPORTANT-tier jobs in the DLQ (§28.3)
+    BALANCE     credits spent vs credits granted diverging (§13.4)
+
+  Each one is a query you can write today against data you already
+  have. None of them require a new tool.
+  ```
+  ```sql
+  -- The monitor that would have caught the webhook bug in minutes
+  SELECT COUNT(*) AS paid_but_unfulfilled
+  FROM orders o
+  WHERE o.status = 'paid'
+    AND o.created_at BETWEEN NOW() - INTERVAL '2 hours'
+                         AND NOW() - INTERVAL '10 minutes'   -- grace window
+    AND NOT EXISTS (SELECT 1 FROM entitlements e WHERE e.order_id = o.id);
+  -- > 0 for more than one cycle = page someone
+  ```
+
+### 29.2 Alert on the absence of expected events
+- **Rule:** Alert when something that should happen *doesn't*. No orders in 30
+  minutes during business hours, no successful jobs in an hour, no webhooks
+  received today — silence where there should be activity is a first-class
+  alert.
+- **Explanation:** This is the highest-value single alert you can build,
+  because it catches failures you never thought to anticipate. Error-based
+  alerting only fires for failure modes someone predicted and instrumented;
+  absence-based alerting fires for *anything* that stops the business
+  working — a dead worker, a broken deploy, a DNS change, an expired
+  credential, a third party silently rejecting you. It's also cheap: one
+  query, one threshold, one schedule. Every heartbeat pattern in this document
+  (§25.4's dead-man's switch, §28.3's worker heartbeat) is the same idea.
+- **Applies to:** Every regular, expected business event. Stacks: a scheduled
+  check plus a dead-man's-switch service (Healthchecks.io, Cronitor) so the
+  monitor itself failing also alerts.
+- **Example:**
+  ```
+  Absence alerts, with baselines you set from your own history:
+
+    [ ] No completed orders in 30 min during business hours
+    [ ] No successful background jobs in 60 min
+    [ ] No inbound webhooks from Stripe in 2 hours
+    [ ] No new signups in 24 hours (for a product that gets daily ones)
+    [ ] No successful backup in 25 hours (§25.4)
+    [ ] No CI run in 24 hours on an active repo
+    [ ] The monitoring job itself hasn't reported in 15 min
+        ← without this, a dead monitor looks exactly like a healthy system
+
+  Set thresholds from YOUR data, not from intuition. Query the last 90
+  days for the longest normal quiet period, then alert above it. And
+  account for nights and weekends, or you will mute the alert within
+  a week — a muted alert is the same as no alert.
+  ```
+
+### 29.3 Never trust your own success signal — reconcile with the system of record
+- **Rule:** For anything involving money or external state, verify against the
+  authoritative source on a schedule. Your database saying "paid" is a claim;
+  the payment provider is the truth. Alert on any divergence.
+- **Explanation:** The six-hour failure existed precisely because the system
+  trusted itself: the handler wrote `paid`, so every internal view agreed
+  everything was fine. Any bug between "we think it worked" and "it actually
+  worked" is invisible from inside. Reconciliation closes that by comparing
+  against the system that actually holds the truth — and it's the same
+  discipline as §13.4's metering reconciliation and §16.2's dispute
+  monitoring, applied to fulfillment.
+- **Applies to:** Payments, subscriptions, credits, inventory, email delivery,
+  and any state mirrored from a third party. Stacks: a scheduled job pulling
+  the provider's records and diffing them against yours.
+- **Example:**
+  ```typescript
+  // Hourly: does Stripe agree with us about what was paid?
+  const since = subHours(new Date(), 24);
+  const stripeCharges = await stripe.charges.list({ created: { gte: unix(since) }, limit: 100 });
+
+  const succeededAtStripe = new Set(
+    stripeCharges.data.filter(c => c.status === 'succeeded').map(c => c.id));
+  const paidInOurDb = await db.orders.findMany({
+    where: { status: 'paid', createdAt: { gte: since } }, select: { chargeId: true, id: true }});
+
+  // Two directions, two different bugs — check both
+  const weSayPaidTheyDont = paidInOurDb.filter(o => !succeededAtStripe.has(o.chargeId));
+  //  ↑ the six-hour bug: we delivered product for money we never received
+  const theyPaidWeMissedIt = [...succeededAtStripe].filter(
+    id => !paidInOurDb.some(o => o.chargeId === id));
+  //  ↑ the other bug: they paid and got nothing. Worse for the customer.
+
+  if (weSayPaidTheyDont.length || theyPaidWeMissedIt.length) {
+    await alert({ severity: 'critical', kind: 'payment_reconciliation_drift',
+                  weSayPaidTheyDont, theyPaidWeMissedIt });
+  }
+  ```
+  ```
+  Also verify the webhook path itself, since that is what broke:
+    [ ] Handler returns non-2xx on genuine failure, so the provider
+        RETRIES. Returning 200 to "stop the noise" is the bug.
+    [ ] Signature verification on every webhook (§8.2)
+    [ ] Idempotent by event id — providers redeliver (§12.4)
+    [ ] Alert if the provider's dashboard shows failed deliveries
+    [ ] Alert on webhook silence (§29.2) — a webhook that stops
+        arriving looks identical to "no sales today"
+  ```
+
+### 29.4 Measure your discovery gap and shrink it on purpose
+- **Rule:** Track how long each incident took to detect, and treat that number
+  as the metric to improve. After every incident ask "what would have caught
+  this in 60 seconds?" and build that monitor before closing the post-mortem.
+- **Explanation:** The gap is a variable you control, but only if you measure
+  it — otherwise every incident gets fixed and the *detection* stays exactly
+  as slow. Recording detection time separately from resolution time makes the
+  pattern visible: if customers keep being your alerting system, the fix isn't
+  better code, it's a monitor. Companies that survive at scale aren't the ones
+  with the fewest failures; they're the ones whose failures are small because
+  they were caught early.
+- **Applies to:** Every production incident, including small ones. Stacks: a
+  simple incident log; the §9.4 audit log and §14 timestamps give you the
+  start time, and the alert or ticket gives you the detection time.
+- **Example:**
+  ```
+  # INCIDENT_LOG.md — one row per incident, detection time first
+
+  | Date       | What broke            | Started | Detected | Gap    | Found by     |
+  |------------|-----------------------|---------|----------|--------|--------------|
+  | 2026-08-02 | Webhook 200 on fail   | 02:10   | 08:30    | 6h 20m | CUSTOMER ❌   |
+  | 2026-08-09 | Worker died           | 14:05   | 14:07    | 2m     | queue alert ✅|
+  | 2026-08-14 | Email provider quota  | 09:40   | 09:44    | 4m     | absence alert✅|
+
+  The "Found by" column is the whole point. Any row saying CUSTOMER is
+  a missing monitor, and it goes on the backlog as one.
+
+  Post-mortem question that must be answered before closing (§8.5):
+    "What single monitor would have caught this in 60 seconds?"
+    → build it now, while the failure is still fresh and specific.
+       Generic monitoring is what you had; this is what you needed.
+
+  Targets worth aiming at:
+    Revenue-affecting failures    detect in < 5 min
+    Customer-visible failures     detect in < 15 min
+    Internal/degraded             detect in < 1 hour
+    Found-by-customer rate        trending to zero
+  ```
+
+---
+
+## 30. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
