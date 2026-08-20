@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–33**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–35**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–33)
+### Part II — What it builds, and the business under it (5–35)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -237,8 +237,20 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [33.2 When refresh fails, preserve what the user was doing](#332-when-refresh-fails-preserve-what-the-user-was-doing)
   - [33.3 Rotate refresh tokens, and treat reuse as a compromise](#333-rotate-refresh-tokens-and-treat-reuse-as-a-compromise)
   - [33.4 Store tokens where a script can't read them](#334-store-tokens-where-a-script-cant-read-them)
+- [34. Support as a Build Deliverable](#34-support-as-a-build-deliverable)
+  — *at 2am a customer can't log in — who handles that?*
+  - [34.1 Every feature ships with its support playbook, same sprint](#341-every-feature-ships-with-its-support-playbook-same-sprint)
+  - [34.2 Connect the agent to production so it responds in real time](#342-connect-the-agent-to-production-so-it-responds-in-real-time)
+  - [34.3 Define the three support tiers before your first customer](#343-define-the-three-support-tiers-before-your-first-customer)
+  - [34.4 Close the loop — every escalation becomes tomorrow's playbook](#344-close-the-loop--every-escalation-becomes-tomorrows-playbook)
+- [35. Deploy Any Day — Flags, Canaries, Automated Rollback](#35-deploy-any-day--flags-canaries-automated-rollback)
+  — *Friday fear is an architecture problem, not a calendar one*
+  - [35.1 Separate deploying from releasing with feature flags](#351-separate-deploying-from-releasing-with-feature-flags)
+  - [35.2 Release to a canary and let the metrics decide](#352-release-to-a-canary-and-let-the-metrics-decide)
+  - [35.3 Automate the rollback — a manual revert is a prayer](#353-automate-the-rollback--a-manual-revert-is-a-prayer)
+  - [35.4 Write runbooks so nobody makes decisions at 3am](#354-write-runbooks-so-nobody-makes-decisions-at-3am)
 
-- [34. Meta](#34-meta)
+- [36. Meta](#36-meta)
 
 ---
 
@@ -268,6 +280,8 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Building anything multi-tenant | [§31](#31-tenant-isolation) |
 | Writing any API endpoint | [§32.1 schema at the boundary](#321-validate-every-request-against-a-schema-at-the-boundary) |
 | Users logged out every hour | [§33](#33-token-lifecycle--keeping-users-logged-in-safely) |
+| Nobody covers 2am support | [§34](#34-support-as-a-build-deliverable) |
+| Scared to deploy on Friday | [§35](#35-deploy-any-day--flags-canaries-automated-rollback) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -278,7 +292,8 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 `RETENTION_SCHEDULE.md` (§6.3) · `INCIDENT_RUNBOOK.md` (§8.5) ·
 `SECURITY_POSTURE.md` (§10.2) · `VENDOR_RISK.md` (§10.3) ·
 `LAUNCH_READINESS.md` (§10.5) · `SECRETS_POSTURE.md` (§11.4) ·
-`RESTORE_LOG.md` (§25.3) · `CACHE_POLICY.md` (§26.1) · `INCIDENT_LOG.md` (§29.4)
+`RESTORE_LOG.md` (§25.3) · `CACHE_POLICY.md` (§26.1) · `INCIDENT_LOG.md` (§29.4) ·
+`SUPPORT_TIERS.md` (§34.3) · `docs/playbooks/*` (§34.1) · `runbooks/*` (§35.4)
 
 ---
 
@@ -7702,7 +7717,402 @@ a permanent backdoor.
 
 ---
 
-## 34. Meta
+## 34. Support as a Build Deliverable
+
+Your AI built the app and shipped it. Customers are paying. At 2am one of them
+can't log in — **who handles that?** Not the AI: it isn't connected to
+production and nobody asked it to build a support system.
+
+That gap kills more launched products than bad code does.
+
+Three things close it: **every feature ships with its support playbook**,
+**the agent is connected to production in real time**, and **the support tiers
+exist before the first customer signs up.**
+
+> Related: §21 defines where an automated agent must *stop* and escalate.
+> This section is how the support system gets *built* — and §21's playbooks
+> are the artifact this one produces.
+
+### 34.1 Every feature ships with its support playbook, same sprint
+- **Rule:** When the AI builds a feature, it writes the playbook for
+  supporting that feature in the same conversation. Login gets password-reset
+  failures, expired tokens, locked accounts. Payments gets failed charges,
+  missed webhooks, subscription states. Treat it as a production deliverable,
+  not documentation debt.
+- **Explanation:** This works for the same reason §20.1 works for tests — the
+  context is loaded. While building the login flow the AI knows every failure
+  branch it just wrote, every error code it chose, and every state a user can
+  get stuck in. That's exactly the material a playbook needs, and it's gone an
+  hour later. Written after launch, playbooks get written from memory, during
+  an incident, by someone guessing — if they get written at all.
+- **Applies to:** Every feature in every AI-assisted build. Stacks: keep them
+  as markdown in the repo next to the code (they version with it), or synced
+  to your help centre so the §21 agent can ground on them.
+- **Example:**
+  ```
+  Add to CLAUDE.md so it happens by default (§9.5):
+
+    "Every feature ships with docs/playbooks/<feature>.md covering each
+     failure mode the code handles: the symptom a user reports, how to
+     confirm it, the fix, and when to escalate. Written in the same
+     change as the feature."
+
+  # docs/playbooks/login.md
+  ## Symptom: "I can't log in, it says my password is wrong"
+    Confirm:  auth_events for this email in the last hour — look for
+              status=locked (5+ failures) vs status=invalid_password
+    Fix:      locked → unlock + tell them the lockout window;
+              invalid → send reset link, confirm the email is theirs
+    Escalate: if auth_events shows successful logins from an unfamiliar
+              country, this is account takeover — go to §23 / Tier 3
+    Never:    never reset a password on request alone; verify identity
+
+  ## Symptom: "The reset link says expired"
+    Confirm:  token issued_at — links expire after 60 minutes
+    Fix:      reissue; if they report it repeatedly, check email
+              delivery delay (§29.1) — the link may be arriving late
+    Escalate: delivery delays affecting many users = Tier 3
+
+  Each playbook entry answers four things and nothing more:
+    SYMPTOM (in the customer's words) · CONFIRM · FIX · ESCALATE WHEN
+  ```
+
+### 34.2 Connect the agent to production so it responds in real time
+- **Rule:** Give the support agent read access to production signals —
+  alerts, error events, payment webhooks, job failures — so it receives them
+  as they happen rather than when someone checks email. Read-only by default;
+  writes only through explicitly approved actions.
+- **Explanation:** A playbook the agent can't act on is a document. Connected,
+  it closes the §29 discovery gap from the support side: a known issue with a
+  documented fix gets resolved before the customer writes in, and an unknown
+  one arrives at your desk already packaged with the context and a
+  recommendation. The read-only default matters — an agent with write access
+  to production is one confidently-wrong action away from making an incident
+  worse, so mutations stay on an allowlist of specific, reversible operations.
+- **Applies to:** Any product with paying customers and an automated support
+  layer. Stacks: MCP servers or scoped API tokens for your error tracker,
+  payment provider, queue dashboard, and database read replica — each with a
+  restricted credential (§8.4) and every access logged (§9.4).
+- **Example:**
+  ```
+  What the agent should READ (grant early — this is where the value is):
+    · Error events and replays for a given user (§14, §30)
+    · Payment/subscription state from the provider, not just your DB (§29.3)
+    · Job queue status and dead-letter entries (§28.3)
+    · Audit log for the account in question (§9.4)
+    · Feature flag state for that user (§35.1)
+
+  What the agent may WRITE (allowlist, each one reversible and audited):
+    · Resend a receipt or a verification email
+    · Unlock an account after documented identity verification
+    · Retry a failed background job
+    · Grant a documented courtesy credit under a fixed cap
+
+  What it must NEVER do without a human:
+    ✗ Issue refunds or change billing (§21.1)
+    ✗ Modify permissions, roles, or entitlements
+    ✗ Delete anything (§6.1)
+    ✗ Run arbitrary SQL or deploy anything
+    ✗ Message a customer about an incident it hasn't been told to disclose
+
+  Every agent action writes to the audit log with actor_type='agent'
+  (§9.4), so "what did the bot do at 2am" is always answerable.
+  ```
+
+### 34.3 Define the three support tiers before your first customer
+- **Rule:** Write down the tier structure in advance: Tier 1 automated
+  resolution, Tier 2 assisted triage with escalation, Tier 3 incident
+  response. Tier 3 in particular — who is notified, what gets locked down, how
+  customers are told — must exist before you need it.
+- **Explanation:** Tiers are a routing decision, and routing decided during an
+  incident is decided badly. The Tier 3 case is the one that must be
+  pre-written, because it's the multi-customer, security, or data-integrity
+  situation where every minute counts and where §31.4's "how long, who else"
+  questions arrive. Tiers 1 and 2 are about efficiency; Tier 3 is about not
+  improvising a breach response at 2am with a legal clock running (§6.3).
+- **Applies to:** Every product with customers. Stacks: this is a document
+  plus routing rules in your ticketing system — it costs an afternoon and
+  it's the cheapest item in this section.
+- **Example:**
+  ```
+  # docs/SUPPORT_TIERS.md
+
+  ## Tier 1 — Automated resolution        (target: most routine volume)
+    Known issue, documented playbook, deterministic fix.
+    Agent resolves; logs the playbook used; never invents a fix.
+    Examples: password reset, receipt resend, seat sync, known config error
+    Exit: if the playbook doesn't fit exactly → Tier 2. Never improvise.
+
+  ## Tier 2 — Assisted triage
+    Unknown issue, or any of §21's escalation triggers (evidence conflict,
+    intent mismatch, upset customer, billing, enterprise account).
+    Agent packages: transcript · account state · error events · replay
+    link · audit trail · a recommended action. Human decides; agent
+    executes; the resolution becomes a new Tier 1 playbook (§34.4).
+    Target first response: within your published SLA, not "when seen"
+
+  ## Tier 3 — Incident response          (write this FIRST — it's the one
+                                          you cannot improvise)
+    Triggered by: multiple customers affected · security · data integrity
+    · tenant isolation (§31) · payment failures at scale (§29)
+    [ ] Who is paged, and who is the backup if they don't answer
+    [ ] Who decides to disable a feature or roll back (§35)
+    [ ] What gets locked down immediately (flags off, endpoint disabled)
+    [ ] Who writes the customer communication, and who approves it
+    [ ] Legal clock: GDPR 72h, HIPAA, financial reporting (§6.3, §31.4)
+    [ ] Status page updated by whom, how often
+    [ ] Where the incident timeline is recorded (§29.4)
+  ```
+
+### 34.4 Close the loop — every escalation becomes tomorrow's playbook
+- **Rule:** After every Tier 2 resolution, write the playbook entry. Track the
+  ratio of Tier 1 to Tier 2 volume over time; if it isn't improving, the loop
+  isn't closing.
+- **Explanation:** This is what makes the system compound rather than just
+  exist. Each unknown issue is solved once by a human and then permanently by
+  the agent — so support load falls even as customers grow, which is the only
+  version of support that scales without headcount. The measurement is what
+  keeps it honest: teams believe the loop is closing long after it stopped,
+  and the tier ratio is the number that says otherwise. Watch it alongside
+  §21.4's reopen rate, since automating more is only good if the automation is
+  actually resolving things.
+- **Applies to:** Every support operation with an automated tier. Stacks: a
+  required field on ticket closure ("playbook created / updated / n/a"), plus
+  the §21.4 scorecard.
+- **Example:**
+  ```
+  The loop, per Tier 2 ticket — one extra step at closure:
+
+    1. Human resolves it
+    2. Write the playbook entry: symptom, confirm, fix, escalate-when
+    3. Add the case to §21.3's escalation triggers if it should have
+       been escalated sooner than it was
+    4. If it was a product defect, file it — support playbooks should
+       not become permanent workarounds for bugs you could fix
+    5. If it recurred from a known cause, that's a §29.4 monitoring gap
+
+  Monthly review — three numbers:
+
+    Tier 1 share of volume      trending UP means the loop is working
+    Tier 2 volume per customer  trending DOWN means the product is
+                                getting less confusing, not just better
+                                documented
+    Playbook coverage           % of Tier 2 tickets that produced an
+                                entry. Below ~80% and the loop is open.
+
+  Warning: if Tier 1 share rises while §21.4's reopen rate also rises,
+  you are not automating support — you are closing tickets on people.
+  ```
+
+---
+
+## 35. Deploy Any Day — Flags, Canaries, Automated Rollback
+
+"Never deploy on a Friday" says more about an architecture than a calendar.
+The real question isn't which day it is — it's **what could go wrong that you
+couldn't fix remotely in 30 minutes.**
+
+Four things make any day a deploy day: **feature flags**, **canary releases**,
+**automated rollback**, and **runbooks**. Not courage — architecture. Boring
+deployments are the goal.
+
+> Related: §18 is the baseline — staging, a CI gate, one-click rollback. This
+> section is the level above it, where the rollback needs no click and the
+> release is decoupled from the deploy entirely.
+
+### 35.1 Separate deploying from releasing with feature flags
+- **Rule:** Ship code to production with the feature turned off, then enable it
+  for a small percentage and watch. Deployment is a technical event; release is
+  a business decision. Flags are what decouple them.
+- **Explanation:** Once the two are separate, deploying stops being scary
+  because deploying stops *doing* anything user-visible. The risky moment moves
+  to a toggle you control, at a time you choose, with a blast radius you set —
+  and undoing it is one flip rather than a redeploy. That also changes who can
+  make the call: turning a feature off during an incident no longer requires an
+  engineer with deploy access, which is exactly what you want at 2am.
+- **Applies to:** Every user-facing change of consequence. Stacks: LaunchDarkly,
+  Flagsmith, PostHog feature flags, Unleash, Statsig, or a database table plus a
+  cached lookup for a small product. Evaluate server-side for anything security-
+  relevant — a client-side flag is a suggestion, not a control.
+- **Example:**
+  ```typescript
+  // Deploy dark, then release gradually
+  if (await flags.enabled('new-checkout', { userId, orgId })) {
+    return newCheckout(req);
+  }
+  return legacyCheckout(req);      // ← keep this path until the flag is 100%
+                                   //   and has stayed there for a while
+  ```
+  ```
+  The rollout, and the discipline that keeps flags from becoming debt:
+
+    Deploy    flag off for everyone. Code is live, feature is not.
+    5%        internal users, then a small cohort. Watch §14 error
+              rates and §29.1 business metrics side by side.
+    25% → 50% → 100%, pausing at each step long enough to see real
+              traffic patterns (a full business day, not ten minutes)
+    Clean up  remove the flag AND the old code path
+
+  ⚠ FLAG DEBT is the failure mode nobody warns about. Every permanent
+  flag doubles the number of code paths, and ten flags is 1,024
+  theoretical combinations you cannot test (§19.1). Rules:
+
+    [ ] Every flag has an OWNER and a REMOVAL DATE at creation
+    [ ] Release flags are temporary — delete within ~30 days of 100%
+    [ ] Distinguish RELEASE flags (temporary) from OPERATIONAL toggles
+        (kill switches, permanent by design) and PERMISSION flags
+        (entitlements — those belong in §23, not in a flag system)
+    [ ] Audit quarterly; a flag nobody remembers is a bug waiting
+    [ ] Flag state is included in error reports (§14.3) — otherwise
+        you cannot tell which code path the user was actually on
+  ```
+
+### 35.2 Release to a canary and let the metrics decide
+- **Rule:** Route a small share of traffic to the new version while the rest
+  stays on the old one. Watch error rate, latency, and status codes on the
+  canary specifically. If they degrade against the baseline, shift traffic
+  back automatically.
+- **Explanation:** A canary limits exposure and, more importantly, gives you a
+  *control group*: the old version running concurrently is the baseline that
+  tells you whether a 2% error rate is new or normal. Without it you're
+  comparing against yesterday, which differs for a dozen unrelated reasons.
+  The automatic shift-back is the part that makes this work at 2am — the
+  decision is a threshold comparison, which is exactly the kind of judgment
+  that shouldn't wait for a human to wake up.
+- **Applies to:** Any service with more than one instance or a platform
+  supporting traffic splitting. Stacks: Kubernetes with Argo Rollouts or Flagger,
+  AWS CodeDeploy canary, Cloud Run traffic splitting, Vercel skew protection
+  plus a flag-based canary if you can't split at the infrastructure layer.
+- **Example:**
+  ```yaml
+  # Argo Rollouts — promote on metrics, abort automatically on regression
+  strategy:
+    canary:
+      steps:
+        - setWeight: 5
+        - pause: { duration: 10m }
+        - analysis:
+            templates: [{ templateName: error-rate-and-latency }]
+        - setWeight: 25
+        - pause: { duration: 30m }
+        - setWeight: 100
+  # analysis template compares CANARY vs STABLE — abort rolls traffic back
+  # with no human involved
+  ```
+  ```
+  What to measure on the canary (compare to stable, not to history):
+    [ ] HTTP 5xx rate            [ ] p95 / p99 latency
+    [ ] Unhandled exceptions     [ ] Queue depth and job failures (§28.3)
+    [ ] Business outcomes — checkout completion, signup rate (§29.1)
+        ← the one people omit, and the one that catches a deploy which
+          is technically healthy and commercially broken
+
+  Give it enough traffic and enough time to be statistically real. 5%
+  for ten minutes at low volume proves nothing; size the window from
+  your actual request rate.
+  ```
+
+### 35.3 Automate the rollback — a manual revert is a prayer
+- **Rule:** The system detects the failure, halts the deployment, and reverts
+  to the last known good state on its own. If your answer to "the deploy
+  failed, now what?" involves a person remoting into a server, that isn't a
+  rollback plan.
+- **Explanation:** §18.3's one-click rollback is the right baseline; automated
+  rollback is what removes the human latency, which is most of the outage.
+  Detection-to-recovery becomes seconds instead of however long it takes
+  someone to notice, get to a laptop, and remember the command. It also
+  removes the failure mode where the person who knows the procedure is asleep,
+  on a plane, or no longer at the company. The prerequisites are the same ones
+  §18 already asked for — immutable tagged builds, retained previous versions,
+  and backwards-compatible migrations (§18.4), without which "revert" isn't
+  actually available.
+- **Applies to:** Every automated deployment pipeline. Stacks: Argo Rollouts
+  analysis-driven abort, AWS CodeDeploy auto-rollback on CloudWatch alarms,
+  Kubernetes `progressDeadlineSeconds` with `kubectl rollout undo`, or a CI job
+  that watches post-deploy metrics and reverts on breach.
+- **Example:**
+  ```
+  The automated rollback loop:
+
+    1. Deploy proceeds (canary or full)
+    2. Post-deploy watch runs for a fixed window (10-30 min)
+       · error rate vs pre-deploy baseline
+       · p95 latency vs baseline
+       · a business metric (§29.1) — orders/min, signups/min
+    3. Any threshold breached → halt, revert to the last good build,
+       notify the channel with WHAT tripped and WHICH build it went back to
+    4. Deployment marked failed in CI; the branch cannot re-deploy
+       until someone acknowledges
+
+  Prerequisites — verify these before trusting automation (§18):
+    [ ] Builds immutable and tagged by commit SHA
+    [ ] Previous versions retained and instantly promotable
+    [ ] Migrations expand/contract, so reverting code is safe (§18.4)
+    [ ] Feature flags for anything a rollback can't undo (§35.1)
+    [ ] The rollback path is exercised on purpose, on a schedule —
+        an untested automated rollback is §25.3's untested backup
+  ```
+
+### 35.4 Write runbooks so nobody makes decisions at 3am
+- **Rule:** Every failure scenario gets a step-by-step runbook: symptoms, first
+  checks, the fix, who to notify, and how to verify recovery. On-call follows
+  the process rather than reconstructing it from memory.
+- **Explanation:** Judgment at 3am is unreliable — not because on-call
+  engineers are bad, but because tired humans under pressure skip steps,
+  misread dashboards, and take drastic actions that make things worse.
+  A runbook converts the incident into execution: no deciding, no texting
+  fifty people to find who knows. It's also what lets someone who didn't build
+  the system respond to it, which is the difference between an on-call
+  rotation and one person who can never take a holiday.
+- **Applies to:** Every failure mode you've seen once and every one you can
+  anticipate. Stacks: markdown in the repo, linked directly from the alert
+  that fires (§14.5) — a runbook nobody can find at 3am doesn't exist.
+  Extends §8.5's incident runbook to operational failures.
+- **Example:**
+  ```markdown
+  # runbooks/high-error-rate.md
+  **Alert:** api_5xx_rate > 2% for 5 min   **Severity:** page
+
+  ## 1. Stabilize first, diagnose second (§18.3)
+  - [ ] Was there a deploy in the last 30 min? → roll back FIRST
+        `vercel rollback <url>` — do not diagnose a live outage
+  - [ ] Recent feature flag change? → flip it off (§35.1)
+  - [ ] Neither? Continue to step 2.
+
+  ## 2. Identify
+  - [ ] Sentry: which error dominates? Which release? (§14.3)
+  - [ ] One endpoint or all? One region? One tenant? (§31)
+  - [ ] Dependency status: database, payment provider, LLM API
+  - [ ] Connection pool exhausted / queue backed up? (§24.1, §28.3)
+
+  ## 3. Communicate — do not skip while you work
+  - [ ] Status page updated within 15 minutes
+  - [ ] #incidents channel: what's affected, what you're doing, next update
+  - [ ] If payments affected → follow SUPPORT_TIERS.md Tier 3 (§34.3)
+
+  ## 4. Verify recovery
+  - [ ] Error rate back to baseline for 15 min
+  - [ ] Business metric recovered — orders/min normal (§29.1)
+  - [ ] Queue drained, no new DLQ entries (§28.3)
+
+  ## 5. After
+  - [ ] Record start time, detection time, who found it (§29.4)
+  - [ ] Post-mortem within a week: what monitor would have caught this
+        in 60 seconds? Build it before closing.
+  ```
+  ```
+  Runbooks worth having before you need them:
+    high error rate · database down or connection-exhausted · payment
+    provider outage · queue backed up · a bad deploy · credential leak
+    (§8.5) · tenant isolation breach (§31.4) · data loss / restore (§25.3)
+
+  Test one per quarter as a drill. A runbook that has never been
+  followed is a document, not a procedure.
+  ```
+
+---
+
+## 36. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
