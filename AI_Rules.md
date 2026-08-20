@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–29**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–30**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–29)
+### Part II — What it builds, and the business under it (5–30)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -213,8 +213,14 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [29.2 Alert on the absence of expected events](#292-alert-on-the-absence-of-expected-events)
   - [29.3 Never trust your own success signal — reconcile with the system of record](#293-never-trust-your-own-success-signal--reconcile-with-the-system-of-record)
   - [29.4 Measure your discovery gap and shrink it on purpose](#294-measure-your-discovery-gap-and-shrink-it-on-purpose)
+- [30. Session Replay — Watch Instead of Asking](#30-session-replay--watch-instead-of-asking)
+  — *"everything stopped working" is all you'll ever get*
+  - [30.1 Record sessions so you never have to ask what happened](#301-record-sessions-so-you-never-have-to-ask-what-happened)
+  - [30.2 Attach the replay to the error automatically](#302-attach-the-replay-to-the-error-automatically)
+  - [30.3 Flag rage clicks and dead clicks as failures before a ticket exists](#303-flag-rage-clicks-and-dead-clicks-as-failures-before-a-ticket-exists)
+  - [30.4 Replay records everything the user types — mask before you record](#304-replay-records-everything-the-user-types--mask-before-you-record)
 
-- [30. Meta](#30-meta)
+- [31. Meta](#31-meta)
 
 ---
 
@@ -240,6 +246,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | CI bill / minutes blew up | [§27](#27-cicd-cost-control) |
 | Checkout / request is slow | [§28](#28-async-orchestration--stop-synchronous-chaining) |
 | A customer told you it was broken | [§29](#29-the-discovery-gap) |
+| "Everything stopped working" ticket | [§30](#30-session-replay--watch-instead-of-asking) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -6801,7 +6808,238 @@ why.
 
 ---
 
-## 30. Meta
+## 30. Session Replay — Watch Instead of Asking
+
+A user reports a bug. You ask them to describe it. They say **"everything
+stopped working."** That's not a bug report, it's a cry for help — and it's
+the best most users can give you, because they don't know what a stack trace
+is and they were busy trying to do their job.
+
+Three things fix it: **record the sessions**, **attach the replay to the
+error**, and **detect frustration before a ticket is ever filed.**
+
+> Related: §14 makes errors visible to you; this makes the *experience*
+> visible. §14.6's scrubbing rules apply here more than anywhere else in the
+> document — replay is the most invasive telemetry you can deploy (§30.4).
+
+### 30.1 Record sessions so you never have to ask what happened
+- **Rule:** Integrate session replay so user sessions are captured — clicks,
+  scrolls, navigation, network failures, console errors. When someone reports
+  a bug, watch the session instead of interviewing them.
+- **Explanation:** The gap between what users report and what happened is
+  enormous, and it isn't their fault: they describe the *feeling* of the
+  failure, not its mechanism. Replay removes the entire reproduce-it step,
+  which is usually the longest part of fixing a bug — you see the exact
+  sequence, on their device, at their window size, with their data. It's also
+  the only practical way to debug the failures that depend on state you can't
+  recreate: a specific account's data, a slow connection, an ad blocker, a
+  browser extension interfering with your form.
+- **Applies to:** Every web and mobile front-end. Stacks: Sentry Replay
+  (integrates with your existing error tracking — the easiest path if you did
+  §14.1), PostHog, LogRocket, FullStory, Highlight, Clarity. Note replay is
+  usually priced per session, so sample rather than recording everything
+  (§30.4 covers the sampling policy).
+- **Example:**
+  ```typescript
+  Sentry.init({
+    dsn,
+    replaysSessionSampleRate: 0.05,   // 5% of ordinary sessions — cost control
+    replaysOnErrorSampleRate: 1.0,    // 100% of sessions WITH an error
+    integrations: [Sentry.replayIntegration({
+      maskAllText: true,              // §30.4 — non-negotiable
+      blockAllMedia: true,
+      networkDetailAllowUrls: [],     // do NOT capture bodies by default
+    })],
+  });
+
+  // Tag replays so you can find one from a support ticket
+  Sentry.setUser({ id: user.id });          // an ID, not an email (§14.6)
+  Sentry.setTag('plan', user.plan);
+  Sentry.setTag('account_id', user.accountId);
+  ```
+  ```
+  Support workflow this enables — the point of the whole section:
+
+    Ticket: "everything stopped working this morning"
+      1. Search replays by account_id + date
+      2. Watch the session (usually 30 seconds at 2x speed)
+      3. See: they clicked Export, the request 504'd, no error state
+         rendered (§12.2), and the button stayed disabled forever
+      4. You now have the bug, the repro, and the fix — without a
+         single follow-up email
+
+  Give support the ability to look this up themselves. A support
+  reply that says "I can see exactly what happened" changes the
+  conversation entirely (§21.3).
+  ```
+
+### 30.2 Attach the replay to the error automatically
+- **Rule:** Link replays to error events so every exception in your tracker
+  carries the recording of the session that produced it. Look at the error and
+  the experience side by side, not in two separate tools.
+- **Explanation:** A stack trace tells you *where* the code failed; the replay
+  tells you *how the user got there*, which is usually the missing half. A
+  `TypeError` on line 412 is ambiguous until you watch the user paste a value
+  with a trailing newline into the field above it. Automatic linkage is what
+  makes this actually happen — a replay you have to go hunt for in another
+  product gets checked for the interesting errors and ignored for the rest,
+  which are the ones where the context was most needed.
+- **Applies to:** Every error tracker + replay pairing. Stacks: Sentry links
+  them natively when both are enabled with the same DSN; PostHog and LogRocket
+  provide an SDK call to attach the replay URL to an exception. If you use two
+  vendors, push the replay URL into the error's context yourself.
+- **Example:**
+  ```typescript
+  // If the tools are separate, carry the link across explicitly
+  Sentry.setContext('replay', { url: posthog.get_session_replay_url() });
+
+  // And carry the SAME reference id the user sees (§12.1, §14.3) so a
+  // support message maps to one error AND one replay
+  const eventId = Sentry.captureException(err, {
+    contexts: { request: { requestId } },
+  });
+  return { error: { message: '…', reference: eventId } };
+  ```
+  ```
+  What the pairing lets you answer that neither tool answers alone:
+
+    [ ] Did the user see an error state, or a blank screen? (§12.2)
+    [ ] Did they retry — and did the retry double-charge them? (§12.4)
+    [ ] Was the button visible on their viewport at all? (§19.2)
+    [ ] How long did they wait before giving up? (§12.5)
+    [ ] Did they reach support, or just leave? (§14.2's silent exits)
+    [ ] Was this one user or a pattern across many replays?
+
+  Rule of thumb: any error affecting a paying customer gets its replay
+  watched before the fix is designed. Ten minutes of watching prevents
+  a fix aimed at the wrong problem.
+  ```
+
+### 30.3 Flag rage clicks and dead clicks as failures before a ticket exists
+- **Rule:** Detect frustration signals — the same element clicked repeatedly
+  in a few seconds, clicks on things that aren't interactive, rapid back-and-
+  forth navigation, form abandonment — and treat them as UX defects to
+  triage, not as analytics trivia.
+- **Explanation:** Someone clicking the same button seven times in three
+  seconds isn't patient — they're stuck, and they're about to leave. That
+  signal exists *before* the support ticket and for the many users who never
+  file one (§14.2), which makes it a leading indicator rather than a lagging
+  one. It also catches the failures that produce no error at all: a button
+  that's disabled without explaining why, a form that silently rejects input,
+  a link that looks clickable and isn't. Nothing in §14 sees those, because
+  technically nothing broke.
+- **Applies to:** Every interactive surface. Stacks: PostHog, LogRocket,
+  FullStory, and Clarity detect rage/dead clicks out of the box; Sentry has
+  rage-click detection in Replay. Rolling your own is a few lines if your
+  tooling lacks it.
+- **Example:**
+  ```typescript
+  // Minimal rage-click detection if your tool doesn't provide it
+  const clicks = new Map<string, number[]>();
+
+  document.addEventListener('click', (e) => {
+    const key = selectorFor(e.target as Element);
+    const now = Date.now();
+    const recent = (clicks.get(key) ?? []).filter(t => now - t < 3000);
+    recent.push(now);
+    clicks.set(key, recent);
+
+    if (recent.length >= 4) {                  // 4+ clicks in 3 seconds
+      track('ux.rage_click', { selector: key, count: recent.length,
+                               path: location.pathname });
+      clicks.set(key, []);                     // don't spam the same burst
+    }
+  });
+  ```
+  ```
+  Frustration signals worth detecting, and what each usually means:
+
+    RAGE CLICK      same element 4+ times in ~3s
+                    → it's broken, slow with no feedback (§12.5), or
+                      disabled without saying why
+    DEAD CLICK      click on a non-interactive element
+                    → it LOOKS clickable. Fix the affordance, or make
+                      it actually work — users are telling you what
+                      they expected the UI to do
+    THRASHING       rapid back-and-forth between two pages
+                    → they can't find something; your navigation or
+                      labelling is wrong
+    FORM ABANDON    focused a field, never submitted
+                    → which field did they stop on? That one is the
+                      problem (validation, confusion, or a mobile
+                      keyboard covering it — §19.2)
+    ERROR LOOP      same error state hit 3+ times in a session
+                    → your error message doesn't tell them what to do
+                      next (§12.1)
+
+  Review weekly, ranked by affected users × page value. Every rage
+  click on your checkout page is money leaving (§19.3), and it arrives
+  days before the ticket that would have told you.
+  ```
+
+### 30.4 Replay records everything the user types — mask before you record
+- **Rule:** Enable text masking, media blocking, and network-body exclusion
+  *before* the first session is recorded. Sample deliberately, set a short
+  retention, and add the replay vendor to your privacy policy and subprocessor
+  list.
+- **Explanation:** Session replay is categorically more invasive than any
+  other telemetry in this document: it captures literal keystrokes, form
+  contents, on-screen personal data, and network payloads. Deployed with
+  default settings on a real product, it will record passwords being typed,
+  card numbers, medical details, and private messages — and ship them to a
+  third party you may not have disclosed (§10.4), with your retention policy
+  (§6.3) silently not applying. The order matters: masking configured after
+  launch does nothing about what's already stored, and you cannot un-record a
+  session.
+- **Applies to:** Every replay deployment, urgently in healthcare, fintech,
+  HR, or anything with EU users. Stacks: `maskAllText: true` and
+  `blockAllMedia: true` as the baseline in every vendor, then selectively
+  unmask non-sensitive text if you need more detail — allowlist, never
+  denylist.
+- **Example:**
+  ```typescript
+  Sentry.replayIntegration({
+    maskAllText: true,          // mask by DEFAULT, unmask specific elements
+    blockAllMedia: true,
+    mask: ['[data-sensitive]', '.card-field', 'input[type="password"]'],
+    block: ['#medical-notes', '.document-preview'],
+    networkDetailAllowUrls: [], // never capture request/response bodies
+                                // unless you have specifically reviewed them
+  });
+  ```
+  ```html
+  <!-- Mark sensitive regions in the markup so masking survives refactors -->
+  <div data-sensitive>
+    <input name="ssn" />
+    <p>Balance: {{ amount }}</p>
+  </div>
+  ```
+  ```
+  The replay privacy checklist — complete BEFORE recording anything:
+
+  [ ] maskAllText + blockAllMedia on. Unmask by allowlist only.
+  [ ] Payment, auth, and health fields carry a mask attribute
+  [ ] Network request/response bodies NOT captured (they contain
+      tokens and PII — §14.6)
+  [ ] Sampling set deliberately: ~100% on error, a small % otherwise.
+      This is a cost control AND a privacy control.
+  [ ] Retention set short (30–90 days) and matching
+      RETENTION_SCHEDULE.md (§6.3) — replays are personal data
+  [ ] Vendor listed in the privacy policy data inventory and
+      subprocessor list; DPA signed if you have EU users (§10.3)
+  [ ] Internal access restricted and logged — a replay library is a
+      surveillance tool if anyone can browse it freely (§9.4)
+  [ ] You have WATCHED ten real replays and confirmed nothing
+      sensitive is visible. The config is a claim; the recording is
+      the evidence.
+  [ ] Consider excluding admin-impersonation sessions entirely —
+      recording a support agent inside a customer account records
+      that customer's data under a different identity
+  ```
+
+---
+
+## 31. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
