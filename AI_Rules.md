@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–31**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–33**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–31)
+### Part II — What it builds, and the business under it (5–33)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -225,8 +225,20 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [31.2 Put the tenant in every key — cache, queue, files, search](#312-put-the-tenant-in-every-key--cache-queue-files-search)
   - [31.3 Test isolation as its own suite — assert that A cannot see B](#313-test-isolation-as-its-own-suite--assert-that-a-cannot-see-b)
   - [31.4 Be able to answer "how long?" and "who else?" within minutes](#314-be-able-to-answer-how-long-and-who-else-within-minutes)
+- [32. Input Validation — Trust Nothing](#32-input-validation--trust-nothing)
+  — *validate the shape in, escape at the point of use*
+  - [32.1 Validate every request against a schema at the boundary](#321-validate-every-request-against-a-schema-at-the-boundary)
+  - [32.2 Escape at the point of use — don't "clean" on the way in](#322-escape-at-the-point-of-use--dont-clean-on-the-way-in)
+  - [32.3 Reject abusive patterns in middleware, before business logic](#323-reject-abusive-patterns-in-middleware-before-business-logic)
+  - [32.4 Validate what isn't JSON — uploads, webhooks, and client-side checks](#324-validate-what-isnt-json--uploads-webhooks-and-client-side-checks)
+- [33. Token Lifecycle — Keeping Users Logged In Safely](#33-token-lifecycle--keeping-users-logged-in-safely)
+  — *a 60-minute ceiling on every session is a bug, not security*
+  - [33.1 Refresh access tokens silently, before they expire](#331-refresh-access-tokens-silently-before-they-expire)
+  - [33.2 When refresh fails, preserve what the user was doing](#332-when-refresh-fails-preserve-what-the-user-was-doing)
+  - [33.3 Rotate refresh tokens, and treat reuse as a compromise](#333-rotate-refresh-tokens-and-treat-reuse-as-a-compromise)
+  - [33.4 Store tokens where a script can't read them](#334-store-tokens-where-a-script-cant-read-them)
 
-- [32. Meta](#32-meta)
+- [34. Meta](#34-meta)
 
 ---
 
@@ -254,6 +266,8 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | A customer told you it was broken | [§29](#29-the-discovery-gap) |
 | "Everything stopped working" ticket | [§30](#30-session-replay--watch-instead-of-asking) |
 | Building anything multi-tenant | [§31](#31-tenant-isolation) |
+| Writing any API endpoint | [§32.1 schema at the boundary](#321-validate-every-request-against-a-schema-at-the-boundary) |
+| Users logged out every hour | [§33](#33-token-lifecycle--keeping-users-logged-in-safely) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -7292,7 +7306,403 @@ business.
 
 ---
 
-## 32. Meta
+## 32. Input Validation — Trust Nothing
+
+Your AI built an API that processes every request it receives. Missing field?
+Processed. Wrong type? Processed. Malicious payload? Processed. Everything the
+API receives, it trusts.
+
+Three fixes: **validate the shape at the boundary**, **handle dangerous
+content correctly**, and **reject abusive patterns in middleware** before
+business logic ever runs.
+
+> **⚠ One correction on "sanitization."** The common advice — "clean every
+> string on the way in, strip script tags" — is the wrong model and gives
+> false confidence. Input filtering is lossy and easy to bypass; it breaks
+> legitimate data (`O'Brien`, `<3`, a chemistry app storing `H<sub>2</sub>O`)
+> while still missing encodings you didn't think of. The correct model is
+> **validate structure on input, escape at the point of use** — parameterized
+> queries for SQL, contextual encoding for HTML. §32.2 covers this properly.
+
+### 32.1 Validate every request against a schema at the boundary
+- **Rule:** Define a schema for every route's input. Wrong type → reject.
+  Missing required field → reject. Unexpected field → strip. Nothing reaches
+  business logic or the database until it matches.
+- **Explanation:** Without a schema, validation happens implicitly and
+  incompletely — scattered `if (!x) return` checks that cover the fields
+  someone remembered. A schema at the boundary makes the guarantee total and
+  gives your handler a typed, known-good object, which removes a whole class
+  of downstream defensive code. Stripping unknown fields matters more than it
+  looks: it's what stops mass-assignment, where a request adds
+  `"role": "admin"` or `"credits": 99999` to a legitimate payload and your ORM
+  writes it straight through.
+- **Applies to:** Every route, webhook handler, queue job payload, and
+  environment variable. Stacks: Zod, Valibot, or TypeBox (TS), Pydantic
+  (Python), `go-playground/validator` (Go), strong params (Rails), DRF
+  serializers (Django).
+- **Example:**
+  ```typescript
+  const CreateOrder = z.object({
+    items: z.array(z.object({
+      productId: z.string().uuid(),
+      quantity:  z.number().int().min(1).max(100),
+    })).min(1).max(50),
+    couponCode: z.string().regex(/^[A-Z0-9]{4,16}$/).optional(),
+    note:       z.string().max(500).optional(),
+  }).strict();          // ← unknown keys REJECTED, not silently kept
+
+  app.post('/api/orders', requireAuth, async (req, res) => {
+    const parsed = CreateOrder.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(422).json({ error: {                  // §17.4 envelope
+        code: 'validation_failed',
+        message: 'Some fields are invalid.',
+        fields: parsed.error.flatten().fieldErrors,           // actionable §12.1
+      }});
+    }
+    // parsed.data is typed and trusted from here on
+    await createOrder(req.user.id, parsed.data);              // ← userId from
+  });                                                         //   SESSION, never body
+  ```
+  ```
+  Validation rules that prevent real incidents:
+
+  [ ] .strict() everywhere — never spread req.body into a DB write
+  [ ] IDs, prices, roles, and userIds come from the SESSION or the
+      database, never from the request body (mass assignment)
+  [ ] Every string has a max length — unbounded input is a DoS and a
+      storage problem
+  [ ] Every array has a max size — `items: [...50,000]` will find you
+  [ ] Numbers have min/max AND integer checks where relevant
+      (negative quantity = a refund you didn't intend to issue)
+  [ ] Money as integer minor units, never a float (§17.4)
+  [ ] Enums validated against the allowed set, not just "is a string"
+  [ ] Validate query params and path params too, not only bodies
+  [ ] Same schema validates the OUTPUT shape (§17.1)
+  ```
+
+### 32.2 Escape at the point of use — don't "clean" on the way in
+- **Rule:** Store what the user sent. Defend at each point of use:
+  parameterized queries for SQL, contextual encoding for HTML, a proper
+  library for rich text. Never rely on stripping dangerous-looking characters
+  on input.
+- **Explanation:** A script tag in a form field is either a confused user or a
+  probe — and either way the answer isn't to mangle their data, it's to never
+  execute it. Input filtering fails in both directions: it destroys legitimate
+  content, and attackers bypass it with encodings, nesting, and contexts the
+  filter never considered. Escaping at the point of use is different in kind —
+  a parameterized query cannot execute injected SQL regardless of the input,
+  because the data never becomes code. That's a structural guarantee rather
+  than a blocklist you have to keep ahead of.
+- **Applies to:** Every place user data crosses into another language or
+  interpreter — SQL, HTML, shell, file paths, LDAP, regex, template engines.
+  Stacks: any ORM's parameterized queries (never string concatenation),
+  React/Vue/Svelte auto-escaping (never `dangerouslySetInnerHTML` on user
+  content), DOMPurify *at render time* if you must allow rich text.
+- **Example:**
+  ```typescript
+  // SQL — the data never becomes code
+  db.query('SELECT * FROM users WHERE email = $1', [email]);   // ✅ parameterized
+  db.query(`SELECT * FROM users WHERE email = '${email}'`);    // ❌ injectable
+                                                               //   no amount of
+                                                               //   input cleaning
+                                                               //   fixes this
+
+  // HTML — frameworks escape by default; the danger is opting out
+  <p>{userComment}</p>                                          // ✅ escaped
+  <p dangerouslySetInnerHTML={{ __html: userComment }} />       // ❌ executes
+
+  // Rich text you genuinely need to render — sanitize at RENDER, with a
+  // real library and an allowlist, so the stored data stays intact
+  <p dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html, {
+       ALLOWED_TAGS: ['b','i','em','strong','a','p','ul','ol','li'],
+       ALLOWED_ATTR: ['href'],
+     }) }} />
+
+  // Shell / file paths — don't interpolate, and never trust a filename
+  execFile('convert', [inputPath, outputPath]);                 // ✅ argv array
+  exec(`convert ${inputPath} ${outputPath}`);                   // ❌ injectable
+  const safe = path.join(UPLOAD_DIR, crypto.randomUUID());      // ✅ you name it
+  ```
+  ```
+  What input validation IS for (§32.1) vs what escaping is for:
+
+    VALIDATION   is this the right SHAPE? (type, length, range, format)
+                 → reject early, give a clear error, protect your logic
+    ESCAPING     is this safe HERE? (SQL, HTML, shell, path)
+                 → applied at each boundary, every time, automatically
+
+  They are not substitutes. Validation without escaping still gets you
+  injected; escaping without validation still gets you 50,000-item
+  arrays and negative quantities.
+
+  Add the headers that make XSS harder even when you slip:
+    Content-Security-Policy · X-Content-Type-Options: nosniff ·
+    Referrer-Policy · and cookies as HttpOnly + Secure + SameSite (§33.4)
+  ```
+
+### 32.3 Reject abusive patterns in middleware, before business logic
+- **Rule:** Track request patterns per user and per endpoint in middleware. A
+  caller hitting one endpoint 50 times a second isn't using your app — they're
+  probing it. Catch that before the request reaches a handler.
+- **Explanation:** Middleware is the cheapest place to stop abuse: no database
+  query, no business logic, no cost per rejected request. It also catches the
+  attacks that individually look valid — credential stuffing is thousands of
+  perfectly well-formed login requests, and validation (§32.1) passes every
+  one of them. Pattern detection is a different question from correctness, so
+  it needs a different layer.
+- **Applies to:** Every API. See §17.3 for the full rate-limiting and
+  enumeration-detection treatment — this rule is the placement: at the
+  boundary, keyed on identity, before any handler runs.
+- **Example:**
+  ```typescript
+  // Order matters — cheapest rejection first
+  app.use(helmet());                      // security headers
+  app.use(bodyLimit('100kb'));            // reject oversized bodies outright
+  app.use(rateLimiter);                   // per identity + endpoint (§17.3)
+  app.use(abusePatterns);                 // burst / enumeration detection
+  app.use(requireAuth);                   // then identity
+  app.use(routes);                        // finally, business logic
+
+  // Signals worth acting on in middleware
+  const SUSPICIOUS = {
+    burst:        '50+ requests to one endpoint in 1s',
+    authFailures: '10+ failed logins across accounts from one IP',  // stuffing
+    scanning:     '20+ 404s in a minute',                           // probing
+    payloadOdd:   'body contains SQL/script patterns repeatedly',   // signal,
+  };                                                        // not your defense
+  ```
+  ```
+  Important: pattern matching on payloads is a DETECTION signal, not a
+  protection. Blocking requests containing "SELECT" or "<script>" is a
+  WAF-style heuristic — useful for alerting you that someone is probing,
+  trivially bypassed as a defense. Your actual protection is §32.1's
+  schema and §32.2's escaping. Treat a match as "alert and watch this
+  caller" (§14.5), never as "we're safe now."
+  ```
+
+### 32.4 Validate what isn't JSON — uploads, webhooks, and client-side checks
+- **Rule:** Apply the same distrust to file uploads, inbound webhooks, and
+  anything the client already validated. Client-side validation is a UX
+  feature; the server must re-check everything independently.
+- **Explanation:** These three are the gaps left after route schemas are in
+  place. Client validation is trivially bypassed — the form is a suggestion,
+  the API is the boundary. File uploads carry a declared type and filename
+  that are both attacker-controlled, so a `.png` can be anything. And webhooks
+  are an unauthenticated public endpoint accepting instructions about money
+  unless you verify the signature, which is the single most consequential
+  check in this section.
+- **Applies to:** Every upload endpoint, every inbound webhook, every form.
+  Stacks: `file-type` for magic-byte detection, provider SDK signature
+  verification (Stripe `constructEvent`, GitHub HMAC), presigned uploads so
+  files never transit your server.
+- **Example:**
+  ```typescript
+  // Uploads — never trust the filename or the declared MIME type
+  const buf = await file.arrayBuffer();
+  const real = await fileTypeFromBuffer(Buffer.from(buf));      // magic bytes
+  if (!real || !['image/png','image/jpeg','application/pdf'].includes(real.mime))
+    return reject('unsupported file type');
+  if (buf.byteLength > 10 * 1024 * 1024) return reject('too large');
+  const key = `org/${orgId}/${crypto.randomUUID()}.${real.ext}`; // §31.2, and
+                                                                 // YOU name it
+  // Serve from a separate domain or with Content-Disposition: attachment,
+  // so an uploaded HTML/SVG file can never run on your origin.
+
+  // Webhooks — verify the signature BEFORE parsing the body (§8.2)
+  const event = stripe.webhooks.constructEvent(
+    rawBody, req.headers['stripe-signature'], process.env.STRIPE_WEBHOOK_SECRET);
+  // then validate the payload shape too — providers change fields (§17.5)
+  ```
+  ```
+  [ ] Every client-side rule is re-implemented server-side
+  [ ] File type from magic bytes, not extension or Content-Type header
+  [ ] Size limits enforced at the edge, before the body is buffered
+  [ ] You generate stored filenames — never use the uploaded one
+  [ ] Uploads served from a different origin, or forced to download
+  [ ] SVG treated as executable (it can contain script), not as an image
+  [ ] Every webhook signature-verified, idempotent by event id (§12.4)
+  [ ] Queue job payloads validated in the worker — a queue is an input
+      boundary too (§28.2)
+  ```
+
+---
+
+## 33. Token Lifecycle — Keeping Users Logged In Safely
+
+Your users get logged out every hour, mid-task, and land on a login screen.
+Your AI added Google Sign-In but never handled the token lifecycle — so every
+session has a 60-minute ceiling.
+
+Three fixes: **refresh silently before expiry**, **fail gracefully with the
+user's state preserved**, and **rotate refresh tokens** so a stolen one isn't
+a permanent backdoor.
+
+### 33.1 Refresh access tokens silently, before they expire
+- **Rule:** Refresh in the background ahead of expiry — on a timer, and on a
+  `401` as a fallback. The user should never see a login screen because a
+  token aged out.
+- **Explanation:** Short access-token lifetimes are correct: a leaked token
+  should stop working quickly. The mistake is treating expiry as a session
+  ending. The refresh token exists precisely so the session outlives the
+  access token, and if you only implement the initial login flow, you've built
+  a hard one-hour cap on every user's work. Refreshing proactively (say at 80%
+  of the lifetime) is better than reacting to a `401`, because a reactive
+  refresh means at least one request already failed, and that failure has to
+  be replayed correctly or the user loses an action.
+- **Applies to:** Every OAuth/OIDC integration and any JWT-based session.
+  Stacks: Auth.js/NextAuth, Clerk, Auth0, Supabase Auth all handle this if
+  configured — check that refresh is actually enabled rather than assuming.
+  Rolling your own: a single-flight refresh, so ten concurrent 401s trigger
+  one refresh, not ten.
+- **Example:**
+  ```typescript
+  let refreshing: Promise<Tokens> | null = null;      // single-flight
+
+  async function getAccessToken(): Promise<string> {
+    if (Date.now() < tokens.expiresAt - 60_000) return tokens.access;  // still good
+    refreshing ??= doRefresh().finally(() => { refreshing = null; });
+    return (await refreshing).access;                 // concurrent callers share it
+  }
+
+  // Proactive: refresh at ~80% of lifetime, so nothing ever 401s
+  setTimeout(() => void getAccessToken(), (tokens.expiresIn * 0.8) * 1000);
+
+  // Reactive fallback: retry the ORIGINAL request once after refreshing
+  if (res.status === 401 && !req.retried) {
+    await getAccessToken();
+    return fetchWithAuth({ ...req, retried: true });  // once only — §12.3
+  }
+  ```
+
+### 33.2 When refresh fails, preserve what the user was doing
+- **Rule:** A dead refresh token means re-authentication, not data loss.
+  Capture the current route and unsaved work, send them to login, and return
+  them exactly where they were afterwards.
+- **Explanation:** Refresh tokens do eventually expire, and that moment is
+  unavoidable — what's avoidable is it costing the user their work. The
+  default behavior is brutal: a redirect to a blank login screen, a lost
+  draft, a cleared cart, and a user who now associates your product with
+  losing an hour. Preserving the return path and the in-progress state turns
+  a session ending into a ten-second interruption. This is the same principle
+  as §12.5 — the user should never be dropped somewhere with no way forward.
+- **Applies to:** Every authenticated app, especially ones with long-form
+  input — editors, forms, checkout, anything with a draft. Stacks: a
+  `returnTo` parameter validated against an allowlist (never an open redirect),
+  plus drafts autosaved to `localStorage` or the server as the user types.
+- **Example:**
+  ```typescript
+  async function onAuthExpired() {
+    // 1. Save in-progress work BEFORE navigating anywhere
+    await saveDraftLocally({ route: location.pathname + location.search,
+                             form: collectUnsavedState() });
+
+    // 2. Explain, don't just redirect — a silent bounce reads as a crash
+    toast('Your session expired. Signing you back in…');
+
+    // 3. Return path validated against an allowlist — never take an
+    //    arbitrary URL, or you've built an open redirect
+    const returnTo = encodeURIComponent(safePath(location.pathname));
+    location.href = `/login?returnTo=${returnTo}`;
+  }
+
+  // After re-auth: restore route AND state, then confirm it worked
+  const draft = loadDraftLocally();
+  if (draft) { router.replace(draft.route); restoreForm(draft.form);
+               toast('Welcome back — your draft was restored.'); }
+  ```
+
+### 33.3 Rotate refresh tokens, and treat reuse as a compromise
+- **Rule:** Issue a new refresh token every time one is used and invalidate
+  the old one. If a rotated (already-used) token is presented again, revoke
+  the entire token family and force re-authentication.
+- **Explanation:** A long-lived refresh token that works indefinitely is a
+  permanent backdoor — steal it once and you have access forever, invisibly.
+  Rotation makes each token single-use, so a stolen one works at most once.
+  The reuse detection is the clever part: if the attacker uses the stolen
+  token, the real user's next refresh presents a now-invalid token — and vice
+  versa. Either way, a replay is proof that two parties hold the same token,
+  which is exactly the signal you want. Revoke the family, alert the user,
+  and you've turned a silent permanent compromise into a brief one you know
+  about.
+- **Applies to:** Every refresh-token implementation. Stacks: Auth0, Clerk,
+  Supabase, and Keycloak support rotation with reuse detection — turn it on;
+  it's frequently off by default. Rolling your own: store a family id per
+  login and a used-at timestamp per token.
+- **Example:**
+  ```typescript
+  async function refresh(presented: string) {
+    const row = await db.refreshTokens.findUnique({ where: { hash: sha256(presented) }});
+    if (!row) throw new AuthError('invalid');
+
+    if (row.usedAt) {                       // ← REPLAY: two parties hold this
+      await db.refreshTokens.updateMany({   //   revoke the whole family
+        where: { familyId: row.familyId }, data: { revokedAt: new Date() }});
+      await alert({ severity: 'high', kind: 'refresh_token_reuse',
+                    userId: row.userId, familyId: row.familyId });   // §14.5
+      await notifyUser(row.userId, 'We ended your sessions for security.');
+      throw new AuthError('reuse_detected');
+    }
+
+    await db.refreshTokens.update({ where: { id: row.id }, data: { usedAt: new Date() }});
+    return issueTokens(row.userId, row.familyId);   // new pair, same family
+  }
+  ```
+  ```
+  [ ] Refresh tokens stored HASHED, never in plaintext (§3.1)
+  [ ] Absolute lifetime as well as rotation (e.g. 30 days max, always)
+  [ ] Reuse detection revokes the family and NOTIFIES the user (§23.4)
+  [ ] Logout revokes server-side — clearing the client is not logout
+  [ ] Users can see and revoke their active sessions
+  [ ] Token events written to the audit log (§9.4)
+  ```
+
+### 33.4 Store tokens where a script can't read them
+- **Rule:** Keep refresh tokens in `HttpOnly`, `Secure`, `SameSite` cookies —
+  not `localStorage`. Rotation limits the damage of a stolen token; storage
+  determines how easily one gets stolen.
+- **Explanation:** This is what makes §33.3 worth doing. Rotation defends
+  against a token captured once and replayed later. It does very little if the
+  token sits in `localStorage`, because any XSS on your origin — your code, a
+  dependency, an analytics snippet — can read it continuously and refresh
+  alongside the legitimate user, staying inside the rotation scheme. An
+  `HttpOnly` cookie is unreadable from JavaScript entirely, which removes that
+  path. The trade-off is CSRF, which `SameSite=Lax`/`Strict` plus a CSRF token
+  on state-changing requests handles.
+- **Applies to:** Every browser-based session. Stacks: most managed auth
+  providers do this correctly by default — verify rather than assume, since
+  many tutorials (and AI-generated code) default to `localStorage` because
+  it's simpler to demonstrate.
+- **Example:**
+  ```typescript
+  res.cookie('refresh_token', token, {
+    httpOnly: true,      // JavaScript cannot read it — the whole point
+    secure:   true,      // HTTPS only
+    sameSite: 'lax',     // CSRF mitigation ('strict' if no cross-site flows)
+    path:     '/api/auth/refresh',   // sent ONLY to the refresh endpoint
+    maxAge:   30 * 24 * 60 * 60 * 1000,
+  });
+  ```
+  ```
+  Where each token belongs:
+
+    Refresh token   HttpOnly cookie, scoped to the refresh path. Never
+                    readable by JS, never in localStorage, never in a URL.
+    Access token    In memory for the page's lifetime is safest. A short
+                    lifetime is what makes this acceptable.
+    Anything        Never in localStorage, never in sessionStorage, never
+                    in a query string (they land in logs, referrers, and
+                    browser history — §14.6).
+
+  And remember what this does NOT fix: XSS can still act AS the user
+  while the page is open, even without reading the token. HttpOnly
+  limits persistence, not impact — §32.2's escaping is still the
+  primary defense.
+  ```
+
+---
+
+## 34. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
