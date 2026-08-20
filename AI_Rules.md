@@ -15,7 +15,7 @@ acting on anything the user did not clearly authorize).
 | **Applies to** | Which project types and stacks it's relevant for |
 | **Example** | Runnable code, a schema, or a checklist you can copy |
 
-Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–30**
+Sections **1–4** govern how an AI agent behaves in a repo. Sections **5–31**
 govern what it builds and the business underneath it — those came from real
 incidents and audits, so the explanations carry the *why* along with the fix.
 
@@ -48,7 +48,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [4.4 Pull requests](#44-pull-requests)
   - [4.5 Reviewing / responding to PR activity](#45-reviewing--responding-to-pr-activity)
 
-### Part II — What it builds, and the business under it (5–30)
+### Part II — What it builds, and the business under it (5–31)
 
 - [5. Infrastructure & Customer Ceiling Rules](#5-infrastructure--customer-ceiling-rules)
   — *who your stack lets you sell to*
@@ -219,8 +219,14 @@ incidents and audits, so the explanations carry the *why* along with the fix.
   - [30.2 Attach the replay to the error automatically](#302-attach-the-replay-to-the-error-automatically)
   - [30.3 Flag rage clicks and dead clicks as failures before a ticket exists](#303-flag-rage-clicks-and-dead-clicks-as-failures-before-a-ticket-exists)
   - [30.4 Replay records everything the user types — mask before you record](#304-replay-records-everything-the-user-types--mask-before-you-record)
+- [31. Tenant Isolation](#31-tenant-isolation)
+  — *"I'm seeing someone else's dashboard"*
+  - [31.1 Enforce tenancy in the database, not in application code](#311-enforce-tenancy-in-the-database-not-in-application-code)
+  - [31.2 Put the tenant in every key — cache, queue, files, search](#312-put-the-tenant-in-every-key--cache-queue-files-search)
+  - [31.3 Test isolation as its own suite — assert that A cannot see B](#313-test-isolation-as-its-own-suite--assert-that-a-cannot-see-b)
+  - [31.4 Be able to answer "how long?" and "who else?" within minutes](#314-be-able-to-answer-how-long-and-who-else-within-minutes)
 
-- [31. Meta](#31-meta)
+- [32. Meta](#32-meta)
 
 ---
 
@@ -247,6 +253,7 @@ incidents and audits, so the explanations carry the *why* along with the fix.
 | Checkout / request is slow | [§28](#28-async-orchestration--stop-synchronous-chaining) |
 | A customer told you it was broken | [§29](#29-the-discovery-gap) |
 | "Everything stopped working" ticket | [§30](#30-session-replay--watch-instead-of-asking) |
+| Building anything multi-tenant | [§31](#31-tenant-isolation) |
 | Users report "it just breaks" | [§12](#12-the-happy-path-trap--error-handling-implementation), [§14.2](#142-silence-is-not-health--assume-the-errors-you-cant-see-are-the-expensive-ones) |
 | An enterprise prospect appeared | [§5.3](#53-enterprise-is-not-customer-11--it-is-customer-100), [§5.4](#54-document-your-customer-ceiling-explicitly) |
 | A user asked to be deleted | [§6.1](#61-delete-my-account-does-not-mean-delete-all-data) |
@@ -7039,7 +7046,253 @@ error**, and **detect frustration before a ticket is ever filed.**
 
 ---
 
-## 31. Meta
+## 31. Tenant Isolation
+
+A Wednesday-morning ticket says: **"I'm seeing someone else's dashboard."**
+Customer A is looking at Customer B's revenue numbers, customer list, and
+private messages.
+
+The technical fix is an hour once you find the root cause — a missing `WHERE`
+clause, or a cache key without the tenant in it. That's the smallest part.
+The legal part is a breach notification to Customer B (72 hours under GDPR,
+plus HIPAA or financial reporting duties depending on their sector). The trust
+part is Customer B leaving, Customer A posting about it publicly, and your
+sales team answering for it on every call for six months.
+
+Customer B will ask three questions. **How long was this happening? Who else
+could have seen my data? What are you doing about it?** If you can't answer
+the first two almost immediately, your monitoring wasn't built for this
+business.
+
+> Related: §17.1 governs what a response returns; §23.2 requires per-request
+> authorization. This section is the tenancy dimension specifically — the one
+> that turns a normal bug into a reportable breach.
+
+### 31.1 Enforce tenancy in the database, not in application code
+- **Rule:** Make cross-tenant reads structurally impossible at the data layer
+  with row-level security or an equivalent. Application-level `WHERE` clauses
+  are a convention, and one forgotten clause is a breach.
+- **Explanation:** Every multi-tenant leak traces to the same shape: one query
+  among hundreds that didn't filter by tenant. You cannot solve that with
+  discipline, because it only takes a single miss across every query anyone —
+  or any AI — will ever write. Pushing the constraint into the database
+  inverts the default: a forgotten filter returns nothing instead of returning
+  everyone's data. That's the difference between a bug that's caught in
+  development and one that's discovered by a customer.
+- **Applies to:** Every multi-tenant product. Stacks: Postgres RLS
+  (Supabase, RDS, Neon), MySQL views per tenant, or a repository layer that
+  physically cannot construct an unscoped query. Schema-per-tenant or
+  database-per-tenant gives the strongest isolation and is worth it for
+  regulated or enterprise customers (§5.3).
+- **Example:**
+  ```sql
+  -- Enable on EVERY tenant-scoped table. One missed table is the gap.
+  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE documents FORCE ROW LEVEL SECURITY;   -- applies to table owner too
+
+  CREATE POLICY tenant_isolation ON documents
+    USING      (org_id = current_setting('app.org_id')::uuid)
+    WITH CHECK (org_id = current_setting('app.org_id')::uuid);
+  --           ↑ USING guards reads; WITH CHECK stops writing INTO another
+  --             tenant, which is the half people forget
+  ```
+  ```typescript
+  // Set the tenant context once per request, from the SESSION — never
+  // from a header, query param, or request body (those are attacker input)
+  async function withTenant<T>(orgId: string, fn: (tx) => Promise<T>) {
+    return db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.org_id', ${orgId}, true)`;
+      return fn(tx);                       // true = scoped to this transaction
+    });
+  }
+  ```
+  ```
+  Audit that RLS actually covers everything — the gaps are systematic:
+
+    -- every table that has a tenant column but no RLS
+    SELECT c.relname FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity;
+
+  [ ] Every tenant-scoped table has RLS enabled AND forced
+  [ ] New tables can't ship without it — add the check to CI (§18.2)
+  [ ] The application role is NOT a superuser and NOT the table owner
+      (RLS is bypassed by both unless FORCEd)
+  [ ] Migrations and admin scripts use a separate, audited role
+  [ ] service_role / admin keys never reach client code (§8.3)
+  ```
+
+### 31.2 Put the tenant in every key — cache, queue, files, search
+- **Rule:** The tenant identifier belongs in every cache key, background job
+  payload, file path, and search index. A cache keyed only on a resource id
+  will serve one tenant's data to another.
+- **Explanation:** The database is the layer people remember to protect; the
+  leak usually comes from somewhere else. `cache.get('dashboard:summary')`
+  returns whichever tenant populated it first. A background job that "processes
+  all pending records" quietly crosses every boundary at once. A shared search
+  index returns matches from every customer. Each of these bypasses your RLS
+  entirely, because none of them go through the database on the read path —
+  which is exactly why §31.1 alone isn't sufficient.
+- **Applies to:** Every layer holding derived or copied data. Stacks: Redis,
+  Next.js cache tags, CDN keys, BullMQ/SQS payloads, S3/R2 prefixes,
+  Elasticsearch/Algolia/Typesense indexes, and any in-memory map living longer
+  than one request.
+- **Example:**
+  ```typescript
+  // WRONG — every one of these leaks across tenants
+  cache.set(`dashboard:summary`, data);            // whose summary?
+  queue.add('report.build', { reportId });         // resolved with which tenant?
+  s3.put(`invoices/${invoiceId}.pdf`, pdf);        // one flat namespace
+  search.index('documents', doc);                  // one shared index
+
+  // RIGHT — tenancy is part of the identity of everything
+  cache.set(`org:${orgId}:dashboard:summary`, data);
+  queue.add('report.build', { orgId, reportId });   // worker re-scopes on it
+  s3.put(`org/${orgId}/invoices/${invoiceId}.pdf`, pdf);
+  search.index(`documents_${orgId}`, doc);          // or a mandatory filter
+
+  // And in the worker, re-establish the boundary — never trust the payload
+  async function buildReport({ orgId, reportId }) {
+    await withTenant(orgId, async (tx) => {         // RLS applies again
+      const report = await tx.reports.findFirst({ where: { id: reportId }});
+      if (!report) throw new Error('not found in this tenant');   // caught it
+    });
+  }
+  ```
+  ```
+  The full sweep — check each one against your codebase:
+
+    [ ] Cache keys (Redis, in-memory, HTTP, CDN, ISR tags)     §26.2
+    [ ] Background job payloads AND the worker's re-scoping
+    [ ] File/object storage paths, and signed URL generation
+    [ ] Search indexes — separate index, or a filter the caller
+        cannot omit
+    [ ] Analytics and reporting queries (often written outside the ORM)
+    [ ] Exports and generated PDFs
+    [ ] Webhooks you send — do not include another tenant's ids
+    [ ] Email templates that render "recent activity"
+    [ ] Any global in-memory singleton in a long-lived process
+  ```
+
+### 31.3 Test isolation as its own suite — assert that A cannot see B
+- **Rule:** Maintain a dedicated cross-tenant test suite that creates two
+  tenants and asserts, for every endpoint and every resource type, that one
+  cannot read, write, or enumerate the other's data. Run it on every PR.
+- **Explanation:** Normal tests use one tenant and pass whether or not
+  isolation works — they're structurally incapable of catching this. A
+  two-tenant suite is the only kind that can, and it's cheap to write once
+  because the same fixture covers every endpoint. This is also where you catch
+  the regression rather than the incident: a new endpoint added six months
+  from now either passes the isolation suite or fails CI, without anyone
+  needing to remember why it matters.
+- **Applies to:** Every multi-tenant codebase. Stacks: your existing test
+  runner with a two-tenant fixture; parameterize over the route list so new
+  endpoints are covered automatically rather than by someone remembering.
+- **Example:**
+  ```typescript
+  describe('tenant isolation', () => {
+    let orgA, orgB, docB;
+    beforeAll(async () => {
+      orgA = await createOrg(); orgB = await createOrg();
+      docB = await createDocument(orgB, { title: 'B private' });
+    });
+
+    // Parameterized over EVERY route — new endpoints are covered by default
+    it.each(ALL_ROUTES)('%s does not leak across tenants', async (route) => {
+      const res = await request(app)
+        .get(route.replace(':id', docB.id))
+        .set('Authorization', tokenFor(orgA));
+      expect(res.status).toBe(404);            // 404, not 403 (§17.2)
+      expect(JSON.stringify(res.body)).not.toContain('B private');
+    });
+
+    it('list endpoints never include another tenant', async () => {
+      const res = await request(app).get('/api/documents')
+        .set('Authorization', tokenFor(orgA));
+      expect(res.body.data.every(d => d.orgId === orgA.id)).toBe(true);
+    });
+
+    it('cache does not bleed between tenants', async () => {
+      await request(app).get('/api/dashboard').set('Authorization', tokenFor(orgA));
+      const b = await request(app).get('/api/dashboard').set('Authorization', tokenFor(orgB));
+      expect(b.body.orgId).toBe(orgB.id);      // not A's cached response
+    });
+
+    it('cannot WRITE into another tenant', async () => {
+      const res = await request(app).patch(`/api/documents/${docB.id}`)
+        .set('Authorization', tokenFor(orgA)).send({ title: 'hijacked' });
+      expect(res.status).toBe(404);
+      expect((await getDocument(docB.id)).title).toBe('B private');
+    });
+  });
+  ```
+
+### 31.4 Be able to answer "how long?" and "who else?" within minutes
+- **Rule:** Log every data access with the acting tenant and the owning tenant,
+  and alert immediately on any mismatch. You must be able to reconstruct the
+  full scope of an isolation failure from logs, not from guesswork.
+- **Explanation:** The two questions Customer B asks are answerable only if you
+  instrumented for them beforehand. Without per-access tenant logging, your
+  honest answer is "we don't know how long, and we don't know who else" —
+  which converts a contained incident into an unbounded one, forces you to
+  notify every customer rather than the affected ones, and is the version that
+  becomes a reputation event. The alert matters as much as the log: a mismatch
+  detected in 60 seconds is a handful of records, while one found by a customer
+  ticket is however long it had been running (§29).
+- **Applies to:** Every multi-tenant product, and it's the specific control an
+  enterprise security review will ask about (§5.3). Stacks: your §9.4 audit log
+  with `actor_org_id` and `resource_org_id` columns, alerting per §14.5, and
+  §8.5's runbook extended to cover the notification duties.
+- **Example:**
+  ```typescript
+  // Instrument the boundary itself — log the mismatch as it happens
+  function assertTenant(actorOrgId: string, resourceOrgId: string, ctx) {
+    if (actorOrgId !== resourceOrgId) {
+      logger.error({ event: 'tenant.violation', actorOrgId, resourceOrgId,
+                     userId: ctx.userId, route: ctx.route, requestId: ctx.requestId });
+      alert({ severity: 'critical', kind: 'tenant_isolation_violation', ctx });
+      throw new NotFoundError();          // fail closed, and 404 (§17.2)
+    }
+  }
+  ```
+  ```sql
+  -- The query that answers "how long, and who else" — write it BEFORE you
+  -- need it, and confirm it returns something in a drill.
+  SELECT actor_org_id, resource_org_id, actor_user_id,
+         MIN(occurred_at) AS first_seen, MAX(occurred_at) AS last_seen,
+         COUNT(*) AS accesses, COUNT(DISTINCT resource_id) AS records_touched
+  FROM data_access_log
+  WHERE actor_org_id <> resource_org_id
+    AND occurred_at > NOW() - INTERVAL '90 days'
+  GROUP BY 1, 2, 3
+  ORDER BY first_seen;
+  ```
+  ```
+  Extend INCIDENT_RUNBOOK.md (§8.5) with a tenant-breach section, because
+  the clock starts the moment you find out:
+
+    1. CONTAIN     disable the affected endpoint or feature; do not wait
+                   for a full fix. A degraded feature beats an open leak.
+    2. SCOPE       run the query above. Exactly which tenants, which
+                   records, how long, and who accessed them.
+    3. PRESERVE    snapshot the logs before retention rotates them (§6.3).
+                   You will need them for the notification and possibly
+                   for a regulator.
+    4. NOTIFY      affected tenants — GDPR is 72 hours from awareness;
+                   HIPAA and financial regulators have their own clocks
+                   (§6.3, §10.4). Notify the AFFECTED parties, and be
+                   specific: what was exposed, when, to whom, what you did.
+    5. FIX + TEST  root cause, then add the case to §31.3's suite so it
+                   can never regress.
+    6. FOLLOW UP   tell affected customers what changed. Customer B does
+                   not care that it was a bug; they care what you did
+                   about it — and that answer is the only part of this
+                   you still control.
+  ```
+
+---
+
+## 32. Meta
 
 - **These rules override defaults; a project's `CLAUDE.md` overrides these.**
   Local, specific rules win over global ones.
